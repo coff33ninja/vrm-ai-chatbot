@@ -12,6 +12,7 @@ Extend this class later with full session/room management as needed.
 import logging
 import asyncio
 import os
+import time
 from typing import Optional
 
 from ..core.config import LiveKitConfig
@@ -58,7 +59,6 @@ class LiveKitClient:
 
         # Optionally try to import realtime (client) SDK for active room join
         try:
-            import livekit  # type: ignore
             # we will attempt to import the Realtime client lazily later
             self._realtime_sdk_available = True
         except Exception:
@@ -201,55 +201,88 @@ class LiveKitClient:
             logger.warning("LiveKit API key/secret not configured; cannot generate token.")
             return None
 
-        if not self._AccessToken or not self._VideoGrant:
-            logger.warning("LiveKit AccessToken class not available in SDK; cannot generate token.")
-            return None
-
-        try:
-            # Best-effort token generation. API differs across SDKs; we try a
-            # commonly used constructor, but guard against failures.
-            token = None
+        # Try SDK-based token generation first (when available)
+        if self._AccessToken and self._VideoGrant:
             try:
-                # Preferred: AccessToken(api_key, api_secret, identity=..., ttl=...)
-                access = self._AccessToken(api_key, api_secret, identity=identity)
-                grant = self._VideoGrant(room=room) if room else self._VideoGrant()
+                token = None
                 try:
-                    access.add_grant(grant)
-                except Exception:
-                    # Some SDK variants use different grant APIs
-                    pass
-                try:
-                    token = access.to_jwt()
-                except Exception as e:
-                    logger.debug(f"AccessToken.to_jwt() failed: {e}")
-                    token = None
-            except Exception:
-                # Fallback: try constructor with positional args (older/newer SDKs vary)
-                try:
-                    access = self._AccessToken(api_key, api_secret, identity)
-                    grant = self._VideoGrant(room)
+                    access = self._AccessToken(api_key, api_secret, identity=identity)
+                    # Many SDKs use a VideoGrant/VideoGrants object
                     try:
-                        access.add_grant(grant)
+                        grant = self._VideoGrant(room=room) if room else self._VideoGrant()
                     except Exception:
-                        pass
+                        # Some SDK variants use different ctor signatures
+                        try:
+                            grant = self._VideoGrant(room)
+                        except Exception:
+                            grant = None
+
+                    if grant is not None:
+                        try:
+                            # Prefer explicit add_grant API when present
+                            if hasattr(access, 'add_grant'):
+                                access.add_grant(grant)
+                            elif hasattr(access, 'with_grants'):
+                                access.with_grants(grant)
+                        except Exception:
+                            pass
+
                     try:
                         token = access.to_jwt()
                     except Exception as e:
-                        logger.debug(f"AccessToken.to_jwt() fallback failed: {e}")
+                        logger.debug(f"AccessToken.to_jwt() failed: {e}")
                         token = None
+
                 except Exception as e:
-                    logger.debug(f"AccessToken construction failed: {e}")
+                    logger.debug(f"AccessToken construction/usage failed: {e}")
                     token = None
 
-            if token:
-                logger.debug("Generated LiveKit access token for identity=%s room=%s", identity, room)
-                return token
-            else:
-                logger.error("Failed to generate LiveKit access token due to SDK incompatibility")
-                return None
+                if token:
+                    logger.debug("Generated LiveKit access token via SDK for identity=%s room=%s", identity, room)
+                    return token
+                else:
+                    logger.debug("SDK-based LiveKit token generation unavailable; falling back to JWT implementation if possible.")
+            except Exception as e:
+                logger.debug(f"SDK-based token generation raised: {e}")
 
+        # Fallback: try to build a JWT manually using PyJWT if available.
+        try:
+            import jwt  # PyJWT
+
+            now = int(time.time())
+            exp = now + int(ttl)
+
+            # LiveKit expects the API key as the issuer and the participant identity
+            # as the subject. The grants payload uses camelCase names in many
+            # examples (roomJoin, canPublish, canSubscribe). We mirror that here.
+            grants = {
+                'video': {
+                    'roomJoin': True,
+                }
+            }
+            if room:
+                grants['video']['room'] = room
+
+            payload = {
+                'iss': api_key,
+                'sub': identity,
+                'exp': exp,
+                'nbf': now - 10,
+                'grants': grants,
+            }
+
+            token = jwt.encode(payload, api_secret, algorithm='HS256')
+            # PyJWT >=2 returns a str, older versions return bytes
+            if isinstance(token, bytes):
+                token = token.decode('utf-8')
+
+            logger.debug("Generated LiveKit access token via PyJWT for identity=%s room=%s", identity, room)
+            return token
+        except ModuleNotFoundError:
+            logger.error("PyJWT not installed and livekit.api AccessToken not available; cannot generate LiveKit token. Install 'pyjwt' or 'livekit' admin SDK.")
+            return None
         except Exception as e:
-            logger.error(f"Exception while generating LiveKit token: {e}")
+            logger.error(f"Failed to generate LiveKit token via fallback JWT method: {e}")
             return None
 
     async def create_room_if_missing(self, room_name: str) -> bool:
