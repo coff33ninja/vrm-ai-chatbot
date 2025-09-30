@@ -83,5 +83,5 @@ void main() {
         discard;
     }
     
-    fragColor = vec4(toot_color, alpha);
+    fragColor = vec4(toon_color, alpha);
 }

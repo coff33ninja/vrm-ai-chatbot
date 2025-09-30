@@ -186,6 +186,27 @@ class Character:
                     obj = GLTF2.from_json(cached_text)
                     obj._path = self.model_path.parent
                     obj._name = self.model_path.name
+                    
+                    # CRITICAL: JSON cache doesn't have binary_blob, so we need to extract it
+                    # from the original file if it's a GLB/VRM
+                    if raw[:4] == b'glTF' and (not hasattr(obj, 'binary_blob') or obj.binary_blob is None):
+                        try:
+                            import struct
+                            if len(raw) >= 12:
+                                pos = 12
+                                if pos + 8 <= len(raw):
+                                    json_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                    pos += 8 + json_chunk_length
+                                    if pos + 8 <= len(raw):
+                                        bin_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                        bin_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                        if bin_chunk_type == 0x004E4942:
+                                            pos += 8
+                                            obj.binary_blob = raw[pos:pos+bin_chunk_length]
+                                            logger.debug(f"Extracted binary_blob from original file: {len(obj.binary_blob)} bytes")
+                        except Exception as e:
+                            logger.warning(f"Failed to extract binary_blob from cache: {e}")
+                    
                     self.vrm_data = obj
                     # populate in-memory cache
                     try:
@@ -209,6 +230,42 @@ class Character:
                     obj._name = self.model_path.name
                 except Exception:
                     pass
+                
+                # CRITICAL FIX: Ensure binary_blob is set for GLB/VRM files
+                # If this is a GLB file and binary_blob isn't set, set it from the file
+                if not hasattr(obj, 'binary_blob') or obj.binary_blob is None:
+                    # Check if this is a binary file (GLB/VRM)
+                    if raw[:4] == b'glTF':
+                        try:
+                            # Parse GLB header to extract binary chunk
+                            import struct
+                            # GLB structure: header (12 bytes) + JSON chunk + BIN chunk
+                            # Header: magic(4) + version(4) + length(4)
+                            # Chunk: chunkLength(4) + chunkType(4) + chunkData
+                            
+                            if len(raw) >= 12:
+                                # Skip header (12 bytes)
+                                pos = 12
+                                
+                                # Read JSON chunk header
+                                if pos + 8 <= len(raw):
+                                    json_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                    json_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                    pos += 8 + json_chunk_length  # Skip JSON chunk
+                                    
+                                    # Read BIN chunk if present
+                                    if pos + 8 <= len(raw):
+                                        bin_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                        bin_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                        
+                                        # 0x004E4942 = 'BIN\x00' in little endian
+                                        if bin_chunk_type == 0x004E4942:
+                                            pos += 8
+                                            obj.binary_blob = raw[pos:pos+bin_chunk_length]
+                                            logger.debug(f"Extracted binary_blob: {len(obj.binary_blob)} bytes")
+                        except Exception as e:
+                            logger.warning(f"Failed to extract binary_blob from GLB: {e}")
+                
                 self.vrm_data = obj
             except Exception as primary_exc:
                 logger.debug(f"Primary GLTF2.load() failed for {self.model_path}: {primary_exc}")
@@ -228,6 +285,24 @@ class Character:
                                 self.vrm_data._name = self.model_path.name
                             except Exception:
                                 pass
+                            
+                            # Ensure binary_blob is set
+                            if not hasattr(self.vrm_data, 'binary_blob') or self.vrm_data.binary_blob is None:
+                                try:
+                                    import struct
+                                    if len(raw) >= 12 and raw[:4] == b'glTF':
+                                        pos = 12
+                                        if pos + 8 <= len(raw):
+                                            json_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                            pos += 8 + json_chunk_length
+                                            if pos + 8 <= len(raw):
+                                                bin_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                                bin_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                                if bin_chunk_type == 0x004E4942:
+                                                    pos += 8
+                                                    self.vrm_data.binary_blob = raw[pos:pos+bin_chunk_length]
+                                except Exception as e:
+                                    logger.debug(f"Failed to set binary_blob in fallback: {e}")
                         except Exception as e:
                             logger.debug(f"GLB binary load attempt failed for {model_path}: {e}")
 

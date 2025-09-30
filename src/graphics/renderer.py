@@ -520,27 +520,112 @@ class VRMRenderer:
             raise ValueError(f"Accessor {accessor_idx} has no bufferView")
 
         buffer_view = vrm_data.bufferViews[accessor.bufferView]
+        buffer = vrm_data.buffers[buffer_view.buffer]
 
-        # Use GLTF2 helper to obtain raw buffer bytes if available. Some buffer
-        # entries are embedded in GLB (no uri) and GLTF2.get_data_from_buffer_uri
-        # understands both external files and data URIs.
-        try:
-            buffer = vrm_data.buffers[buffer_view.buffer]
-            buffer_uri = getattr(buffer, 'uri', None)
-            buffer_data = vrm_data.get_data_from_buffer_uri(buffer_uri)
-        except Exception:
-            # Fallback: if GLTF2 helper fails, try reading buffer.uri relative to model path
+        # Try multiple methods to load buffer data
+        buffer_data = None
+        
+        # Method 1: Check if buffer already has binary_blob (GLB format)
+        if hasattr(vrm_data, 'binary_blob') and vrm_data.binary_blob:
+            buffer_data = vrm_data.binary_blob
+            logger.debug(f"Using binary_blob for buffer {buffer_view.buffer}")
+        
+        # Method 2: Try GLTF2 helper method
+        if buffer_data is None:
             try:
-                buffer_uri = vrm_data.buffers[buffer_view.buffer].uri
-                if buffer_uri and not buffer_uri.startswith('data:'):
-                    # resolve relative to the model path if present
-                    base = getattr(vrm_data, '_path', Path('.'))
-                    buffer_path = Path(base) / buffer_uri
-                    buffer_data = buffer_path.read_bytes()
-                else:
-                    raise
+                buffer_uri = getattr(buffer, 'uri', None)
+                buffer_data = vrm_data.get_data_from_buffer_uri(buffer_uri)
+                logger.debug(f"Loaded buffer via get_data_from_buffer_uri for buffer {buffer_view.buffer}")
             except Exception as e:
-                raise RuntimeError(f"Failed to load buffer for accessor {accessor_idx}: {e}")
+                logger.debug(f"get_data_from_buffer_uri failed: {e}")
+        
+        # Method 3: Handle data URI (base64 encoded)
+        if buffer_data is None and hasattr(buffer, 'uri') and buffer.uri:
+            buffer_uri = buffer.uri
+            if buffer_uri.startswith('data:'):
+                try:
+                    import base64
+                    # Extract base64 data after the comma
+                    header, data_b64 = buffer_uri.split(',', 1)
+                    buffer_data = base64.b64decode(data_b64)
+                    logger.debug(f"Decoded data URI for buffer {buffer_view.buffer}")
+                except Exception as e:
+                    logger.warning(f"Failed to decode data URI: {e}")
+        
+        # Method 4: Try reading external file
+        if buffer_data is None and hasattr(buffer, 'uri') and buffer.uri and not buffer.uri.startswith('data:'):
+            try:
+                # Resolve relative to the model path if present
+                buffer_uri = buffer.uri
+                possible_bases = []
+                
+                if hasattr(vrm_data, '_path') and vrm_data._path:
+                    possible_bases.append(Path(vrm_data._path))
+                
+                if self.character and self.character.model_path:
+                    possible_bases.append(Path(self.character.model_path).parent)
+                
+                for base in possible_bases:
+                    buffer_path = Path(base) / buffer_uri
+                    if buffer_path.exists():
+                        buffer_data = buffer_path.read_bytes()
+                        logger.debug(f"Loaded external buffer file: {buffer_path}")
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to load external buffer file: {e}")
+        
+        # Final check: if still None, raise error
+        if buffer_data is None:
+            raise RuntimeError(
+                f"Failed to load buffer data for accessor {accessor_idx}. "
+                f"Buffer index: {buffer_view.buffer}, "
+                f"Buffer URI: {getattr(buffer, 'uri', 'None')}, "
+                f"Has binary_blob: {hasattr(vrm_data, 'binary_blob')}"
+            )
+
+        # Normalize buffer_data into a bytes-like object. Some pygltflib
+        # helpers or external loaders may return memoryviews, numpy arrays,
+        # or even bound methods in certain circumstances. Coerce common
+        # types to bytes so slicing works reliably below and provide a
+        # helpful error if we can't.
+        try:
+            # If buffer_data is a callable (unexpected), try calling it to
+            # obtain the actual bytes. This covers cases where a method
+            # reference was accidentally stored instead of its result.
+            if callable(buffer_data):
+                logger.debug(f"buffer_data is callable; attempting to call it to obtain bytes (type={type(buffer_data)})")
+                buffer_data = buffer_data()
+
+            # memoryview -> bytes
+            if isinstance(buffer_data, memoryview):
+                buffer_data = buffer_data.tobytes()
+
+            # numpy arrays -> bytes
+            try:
+                import numpy as _np
+                if isinstance(buffer_data, _np.ndarray):
+                    buffer_data = buffer_data.tobytes()
+            except Exception:
+                # numpy may not be available here (should be, but guard)
+                pass
+
+            # Objects exposing tobytes() -> use it
+            if not isinstance(buffer_data, (bytes, bytearray)) and hasattr(buffer_data, 'tobytes'):
+                try:
+                    buffer_data = buffer_data.tobytes()
+                except Exception:
+                    # ignore and fallthrough to final type check
+                    pass
+
+        except Exception as e:
+            logger.debug(f"Failed to normalize buffer_data: {e}")
+
+        # Final type guard: we need a bytes-like object for slicing
+        if not isinstance(buffer_data, (bytes, bytearray, memoryview)):
+            raise RuntimeError(
+                f"Unsupported buffer data type for accessor {accessor_idx}: {type(buffer_data)}. "
+                "Expected bytes/bytearray/memoryview or numpy array."
+            )
 
         # Calculate offset and stride. Guard defaults to zero when attributes are None
         bv_offset = buffer_view.byteOffset or 0
