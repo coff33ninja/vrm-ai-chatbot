@@ -52,6 +52,10 @@ class EventBus:
                 except Exception as e:
                     logger.error(f"Error in event listener for {event_name}: {e}")
     
+    async def publish(self, event_name: str, *args, **kwargs):
+        """Alias for emit() to support both naming conventions."""
+        await self.emit(event_name, *args, **kwargs)
+    
     async def shutdown(self):
         """Shutdown the event bus."""
         self.running = False
