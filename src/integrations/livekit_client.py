@@ -12,7 +12,8 @@ Extend this class later with full session/room management as needed.
 import logging
 import asyncio
 import os
-import time
+import calendar
+import datetime
 from typing import Optional
 
 from ..core.config import LiveKitConfig
@@ -249,32 +250,33 @@ class LiveKitClient:
         try:
             import jwt  # PyJWT
 
-            now = int(time.time())
-            exp = now + int(ttl)
+            # Use integer epoch seconds for nbf/exp like the upstream SDK
+            now_dt = datetime.datetime.now(datetime.timezone.utc)
+            nbf = calendar.timegm(now_dt.utctimetuple())
+            exp = calendar.timegm((now_dt + datetime.timedelta(seconds=int(ttl))).utctimetuple())
 
-            # LiveKit expects the API key as the issuer and the participant identity
-            # as the subject. The grants payload uses camelCase names in many
-            # examples (roomJoin, canPublish, canSubscribe). We mirror that here.
-            grants = {
-                'video': {
-                    'roomJoin': True,
-                }
+            # Build video grants in the same minimal shape as the upstream SDK
+            video = {
+                "roomJoin": True,
+                "canPublish": True,
+                "canSubscribe": True,
             }
             if room:
-                grants['video']['room'] = room
+                video["room"] = room
 
-            payload = {
-                'iss': api_key,
-                'sub': identity,
-                'exp': exp,
-                'nbf': now - 10,
-                'grants': grants,
+            jwt_claims = {
+                "sub": identity,
+                "iss": api_key,
+                "nbf": nbf,
+                "exp": exp,
+                # upstream uses top-level 'video' claim (not nested under 'grants')
+                "video": video,
             }
 
-            token = jwt.encode(payload, api_secret, algorithm='HS256')
+            token = jwt.encode(jwt_claims, api_secret, algorithm="HS256")
             # PyJWT >=2 returns a str, older versions return bytes
             if isinstance(token, bytes):
-                token = token.decode('utf-8')
+                token = token.decode("utf-8")
 
             logger.debug("Generated LiveKit access token via PyJWT for identity=%s room=%s", identity, room)
             return token
