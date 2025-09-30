@@ -108,12 +108,12 @@ class LiveKitClient:
             try:
                 # Use the installed realtime client under livekit.rtc
                 from livekit.rtc.room import Room  # type: ignore
-                from livekit.rtc import connect  # type: ignore
 
                 async def _join():
                     try:
-                        # connect returns a Room instance when using livekit.rtc.connect
-                        room: Room = await connect(server_url, token=token)
+                        # Instantiate Room and connect using the Room.connect API
+                        room = Room()
+                        await room.connect(server_url, token)
                         self._client = room
                         self._room = room
                         self._connected = True
@@ -124,7 +124,6 @@ class LiveKitClient:
 
                         # Register participant join/leave handlers
                         async def on_participant_update(participant, update):
-                            # update contains state change details; for now, emit simple events
                             try:
                                 if update == 'joined':
                                     await self.event_bus.publish('livekit.participant_joined', participant=participant)
@@ -136,7 +135,6 @@ class LiveKitClient:
                         # The Room API provides events; hook a generic listener if available
                         if hasattr(room, 'on'):
                             try:
-                                # Some SDKs support 'participant_update' event or similar
                                 room.on('participant_update', on_participant_update)
                             except Exception:
                                 logger.debug('Could not attach participant_update handler')
