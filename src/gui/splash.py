@@ -6,7 +6,6 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import time
-from pathlib import Path
 
 class SplashScreen:
     """Application splash screen with progress indication."""
@@ -162,7 +161,17 @@ class SplashScreen:
         try:
             # Ensure simulation thread stops
             self.stop_simulation()
-            self.root.after(0, lambda: self._apply_progress(progress, status))
+            # If progress >= 100, apply update and hide the splash shortly after
+            def _update_and_maybe_hide():
+                self._apply_progress(progress, status)
+                try:
+                    if progress >= 100:
+                        # Give UI a tiny moment to show 100% then hide
+                        self.root.after(300, self.hide)
+                except Exception:
+                    pass
+
+            self.root.after(0, _update_and_maybe_hide)
         except Exception:
             # Window might be closed
             return

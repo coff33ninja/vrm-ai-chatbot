@@ -34,12 +34,13 @@ class SystemIntegration:
                 return
 
         self._is_running = True
-        loop = asyncio.get_running_loop()
+        # Capture the running event loop so background callbacks can post to it
+        self._app_loop = asyncio.get_running_loop()
 
         for hotkey_action in hotkeys:
             try:
                 # keyboard.add_hotkey is blocking, so run it in an executor
-                await loop.run_in_executor(
+                await self._app_loop.run_in_executor(
                     None,
                     lambda: keyboard.add_hotkey(
                         hotkey_action.key,
@@ -56,10 +57,20 @@ class SystemIntegration:
     def _on_hotkey_pressed(self, action: str):
         """Callback function for when a registered hotkey is pressed."""
         logger.info(f"Hotkey pressed for action: {action}")
-        asyncio.run_coroutine_threadsafe(
-            self.event_bus.publish("hotkey_pressed", action),
-            asyncio.get_running_loop()
-        )
+        try:
+            loop = getattr(self, '_app_loop', None) or asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop available; try to get the default event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.event_bus.publish("hotkey_pressed", action),
+                loop
+            )
+        except Exception as e:
+            logger.error(f"Failed to dispatch hotkey event: {e}")
 
     async def shutdown(self):
         """Shuts down the system integration, removing hotkey listeners."""
