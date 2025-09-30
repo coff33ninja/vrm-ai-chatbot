@@ -5,9 +5,8 @@ Supports VRM format with MToon shaders, bone animation, and facial expressions.
 
 import logging
 import numpy as np
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from pathlib import Path
-import json
 
 try:
     import moderngl
@@ -457,36 +456,77 @@ class VRMRenderer:
             raise ValueError(f"Invalid accessor index: {accessor_idx}")
         
         accessor = vrm_data.accessors[accessor_idx]
+
+        if accessor.bufferView is None:
+            # Some accessors may be sparse or have no buffer view
+            raise ValueError(f"Accessor {accessor_idx} has no bufferView")
+
         buffer_view = vrm_data.bufferViews[accessor.bufferView]
-        buffer_data = vrm_data.get_data_from_buffer_uri(vrm_data.buffers[buffer_view.buffer].uri)
-        
-        # Calculate offset and stride
-        offset = buffer_view.byteOffset + (accessor.byteOffset or 0)
+
+        # Use GLTF2 helper to obtain raw buffer bytes if available. Some buffer
+        # entries are embedded in GLB (no uri) and GLTF2.get_data_from_buffer_uri
+        # understands both external files and data URIs.
+        try:
+            buffer = vrm_data.buffers[buffer_view.buffer]
+            buffer_uri = getattr(buffer, 'uri', None)
+            buffer_data = vrm_data.get_data_from_buffer_uri(buffer_uri)
+        except Exception:
+            # Fallback: if GLTF2 helper fails, try reading buffer.uri relative to model path
+            try:
+                buffer_uri = vrm_data.buffers[buffer_view.buffer].uri
+                if buffer_uri and not buffer_uri.startswith('data:'):
+                    # resolve relative to the model path if present
+                    base = getattr(vrm_data, '_path', Path('.'))
+                    buffer_path = Path(base) / buffer_uri
+                    buffer_data = buffer_path.read_bytes()
+                else:
+                    raise
+            except Exception as e:
+                raise RuntimeError(f"Failed to load buffer for accessor {accessor_idx}: {e}")
+
+        # Calculate offset and stride. Guard defaults to zero when attributes are None
+        bv_offset = buffer_view.byteOffset or 0
+        acc_offset = accessor.byteOffset or 0
+        offset = bv_offset + acc_offset
+
+        # Determine stride: prefer bufferView.byteStride if present and non-zero,
+        # otherwise compute tightly-packed stride from accessor layout
         stride = buffer_view.byteStride or self._get_accessor_stride(accessor)
-        
-        # Determine numpy dtype
+
+        # Determine numpy dtype for a single component
         dtype = self._get_accessor_dtype(accessor)
-        
-        # Extract data
-        if stride == dtype.itemsize:
-            # Tightly packed
-            end_offset = offset + accessor.count * dtype.itemsize
-            data = np.frombuffer(buffer_data[offset:end_offset], dtype=dtype)
-        else:
-            # Strided access
-            data = np.zeros(accessor.count, dtype=dtype)
-            for i in range(accessor.count):
-                item_offset = offset + i * stride
-                data[i] = np.frombuffer(buffer_data[item_offset:item_offset + dtype.itemsize], dtype=dtype)[0]
-        
-        # Reshape for vector/matrix types
+        component_count = 1
         if accessor.type != 'SCALAR':
             component_count = {
                 'VEC2': 2, 'VEC3': 3, 'VEC4': 4,
                 'MAT2': 4, 'MAT3': 9, 'MAT4': 16
             }[accessor.type]
-            data = data.reshape(-1, component_count)
-        
+
+        # Size in bytes for one accessor element (component_count * dtype.itemsize)
+        element_size = component_count * dtype().nbytes if hasattr(dtype, '__call__') else component_count * dtype().itemsize
+
+        # If stride equals element_size then tightly packed; otherwise handle stride
+        data = None
+        if stride == element_size:
+            end_offset = offset + accessor.count * element_size
+            raw_slice = buffer_data[offset:end_offset]
+            data = np.frombuffer(raw_slice, dtype=dtype)
+            if component_count > 1:
+                data = data.reshape(-1, component_count)
+        else:
+            # Strided access: extract each element respecting the stride
+            data = np.zeros((accessor.count, component_count), dtype=dtype)
+            for i in range(accessor.count):
+                item_offset = offset + i * stride
+                item_bytes = buffer_data[item_offset:item_offset + element_size]
+                if len(item_bytes) < element_size:
+                    raise RuntimeError(f"Insufficient data for accessor {accessor_idx} at index {i}")
+                item = np.frombuffer(item_bytes, dtype=dtype)
+                if component_count > 1:
+                    data[i, :] = item.reshape(component_count)
+                else:
+                    data[i] = item[0]
+
         return data
     
     def _get_accessor_stride(self, accessor) -> int:
@@ -538,24 +578,63 @@ class VRMRenderer:
         
         for img_idx, image in enumerate(vrm_data.images):
             try:
-                # Get image data
-                if image.uri:
-                    if image.uri.startswith('data:'):
-                        # Base64 embedded image
+                # Resolve image data robustly
+                image_data = None
+                # 1) data URI
+                if getattr(image, 'uri', None):
+                    uri = image.uri
+                    if uri.startswith('data:'):
                         import base64
-                        header, data = image.uri.split(',', 1)
-                        image_data = base64.b64decode(data)
+                        try:
+                            header, data = uri.split(',', 1)
+                            image_data = base64.b64decode(data)
+                        except Exception as e:
+                            logger.warning(f"Failed to decode data URI for image {img_idx}: {e}")
                     else:
-                        # External file
-                        image_path = Path(self.character.model_path).parent / image.uri
-                        with open(image_path, 'rb') as f:
-                            image_data = f.read()
-                else:
-                    # Buffer view
-                    buffer_view = vrm_data.bufferViews[image.bufferView]
-                    buffer_data = vrm_data.get_data_from_buffer_uri(vrm_data.buffers[buffer_view.buffer].uri)
-                    offset = buffer_view.byteOffset or 0
-                    image_data = buffer_data[offset:offset + buffer_view.byteLength]
+                        # 2) external file relative to model path or glTF _path
+                        possible_bases = []
+                        if hasattr(vrm_data, '_path') and vrm_data._path:
+                            possible_bases.append(Path(vrm_data._path))
+                        if self.character and self.character.model_path:
+                            possible_bases.append(Path(self.character.model_path).parent)
+
+                        for base in possible_bases:
+                            try_path = (Path(base) / uri)
+                            if try_path.exists():
+                                try:
+                                    image_data = try_path.read_bytes()
+                                    break
+                                except Exception:
+                                    logger.debug(f"Failed to read image file {try_path}")
+
+                # 3) bufferView fallback
+                if image_data is None:
+                    if getattr(image, 'bufferView', None) is not None:
+                        buffer_view = vrm_data.bufferViews[image.bufferView]
+                        try:
+                            # Use GLTF2 helper or fallback to resolving buffer uri
+                            buffer = vrm_data.buffers[buffer_view.buffer]
+                            buf_uri = getattr(buffer, 'uri', None)
+                            buffer_data = vrm_data.get_data_from_buffer_uri(buf_uri)
+                        except Exception:
+                            # Try resolving relative to model path
+                            try:
+                                buf_uri = vrm_data.buffers[buffer_view.buffer].uri
+                                if buf_uri and not buf_uri.startswith('data:'):
+                                    base = getattr(vrm_data, '_path', Path('.'))
+                                    buffer_path = Path(base) / buf_uri
+                                    buffer_data = buffer_path.read_bytes()
+                                else:
+                                    raise
+                            except Exception as e:
+                                raise RuntimeError(f"Failed to load image buffer for image {img_idx}: {e}")
+
+                        offset = buffer_view.byteOffset or 0
+                        length = buffer_view.byteLength or 0
+                        image_data = buffer_data[offset:offset + length]
+
+                if not image_data:
+                    raise RuntimeError(f"No image data found for image index {img_idx}")
                 
                 # Load image with PIL
                 from PIL import Image
