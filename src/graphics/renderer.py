@@ -15,7 +15,7 @@ import pyrr
 from pygltflib import GLTF2
 
 from ..models.character import Character
-from ..utils.math_utils import *
+#from ..utils.math_utils import *
 from ..utils.shader_loader import load_shader_program
 
 logger = logging.getLogger(__name__)

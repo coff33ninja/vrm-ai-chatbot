@@ -20,16 +20,8 @@ def check_python_version():
 
 def install_dependencies():
     """Install Python dependencies."""
-    print("📦 Installing Python dependencies...")
-    
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
-        print("✅ Dependencies installed successfully")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to install dependencies: {e}")
-        return False
+    print("📦 Assuming dependencies are installed (e.g., via 'uv pip install'). Skipping.")
+    return True
 
 def setup_directories():
     """Create necessary directories."""

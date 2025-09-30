@@ -1,7 +1,7 @@
 # Core Python Packages
 numpy>=1.24.0
 pillow>=10.0.0
-asyncio-extensions>=0.1.0
+async-extensions>=0.1.0
 
 # 3D Graphics and Rendering
 PyOpenGL>=3.1.7
@@ -15,7 +15,7 @@ trimesh>=4.0.0
 scipy>=1.11.0
 
 # GUI and Window Management
-tkinter  # Built into Python
+# tkinter  # Built into Python
 pywin32>=306; sys_platform=="win32"
 pillow>=10.0.0
 
