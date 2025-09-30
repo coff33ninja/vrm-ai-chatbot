@@ -37,6 +37,8 @@ voice:
   stt_engine: "whisper"
   stt_language: "en-US"
   stt_timeout: 5.0
+  # Whisper model selection (tiny, base, small, medium, large)
+  whisper_model: "base"
   
   # Azure Speech Services (optional)
   azure_speech_key: null
@@ -56,7 +58,7 @@ graphics:
   transparency: 0.8
   
   # VRM Model Settings
-  default_model: "assets/models/default_character.vrm"
+  default_model: "assets/models/AvatarSample_D.vrm"
   animation_speed: 1.0
   lip_sync_enabled: true
   eye_tracking_enabled: true

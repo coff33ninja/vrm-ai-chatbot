@@ -5,11 +5,19 @@ Handles speech-to-text functionality and manages audio input.
 
 import asyncio
 import logging
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Dict, Any
 
-from .gemini_stt import GeminiSTT, GeminiSTTConfig, create_gemini_stt
+from .gemini_stt import GeminiSTT, GeminiSTTConfig
 from ..core.config import VoiceConfig
 from ..utils.event_bus import EventBus
+
+# Optional Whisper integration (local OpenAI whisper)
+try:
+    import whisper
+    _WHISPER_AVAILABLE = True
+except Exception:
+    whisper = None
+    _WHISPER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +41,9 @@ class SpeechManager:
         self.stt_client: Optional[GeminiSTT] = None
         self.is_listening = False
         self.is_initialized = False
-        
+        # Whisper model instance (loaded lazily if requested)
+        self._whisper_model = None
+
         logger.info("Speech Manager created")
     
     async def initialize(self):
@@ -48,9 +58,26 @@ class SpeechManager:
             if self.config.stt_engine == "gemini":
                 self.stt_client = await self._initialize_gemini_stt()
             elif self.config.stt_engine == "whisper":
-                # TODO: Implement Whisper STT
-                logger.warning("Whisper STT not yet implemented")
-                return
+                # Initialize local Whisper model for non-realtime file transcription
+                if not _WHISPER_AVAILABLE:
+                    logger.error("Whisper library not available. Install 'openai-whisper' (pip install openai-whisper) to enable Whisper STT.")
+                    return
+                try:
+                    loop = asyncio.get_event_loop()
+                    model_name = getattr(self.config, 'whisper_model', 'base')
+                    logger.info(f"Config whisper_model='{model_name}' requested")
+
+                    def _load():
+                        return whisper.load_model(model_name)
+
+                    # Load model in thread pool to avoid blocking
+                    self._whisper_model = await loop.run_in_executor(None, _load)
+                    logger.info(f"Whisper model '{model_name}' loaded")
+                    self.is_initialized = True
+                    return
+                except Exception as e:
+                    logger.error(f"Failed to load Whisper model: {e}")
+                    return
             else:
                 logger.warning(f"Unknown STT engine: {self.config.stt_engine}")
                 return
@@ -163,10 +190,29 @@ class SpeechManager:
             Transcribed text or None
         """
         try:
+            # If Whisper is configured and model is available, use it for file transcription
+            if self.config.stt_engine == 'whisper':
+                if not _WHISPER_AVAILABLE or not self._whisper_model:
+                    logger.error('Whisper model not available for transcription')
+                    return None
+
+                try:
+                    loop = asyncio.get_event_loop()
+
+                    def _transcribe():
+                        result = self._whisper_model.transcribe(audio_file)
+                        return result.get('text', '').strip()
+
+                    text = await loop.run_in_executor(None, _transcribe)
+                    return text
+                except Exception as e:
+                    logger.error(f"Whisper transcription failed: {e}")
+                    return None
+
             if not self.stt_client:
                 logger.error("No STT client available")
                 return None
-            
+
             return await self.stt_client.transcribe_file(audio_file)
             
         except Exception as e:

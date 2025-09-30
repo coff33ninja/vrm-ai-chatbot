@@ -54,6 +54,8 @@ class VRMAIApplication:
         try:
             # Initialize event bus
             await self.event_bus.initialize()
+            # Notify splash / UI about progress
+            await self.event_bus.publish("startup_progress", 5, "Event bus initialized...")
             
             # Initialize transparent window
             self.window = TransparentWindow(
@@ -64,6 +66,7 @@ class VRMAIApplication:
                 click_through=self.config.system.click_through
             )
             await self.window.initialize()
+            await self.event_bus.publish("startup_progress", 15, "Window initialized...")
             
             # Initialize 3D renderer
             self.renderer = VRMRenderer(
@@ -73,6 +76,7 @@ class VRMAIApplication:
                 antialiasing=self.config.graphics.antialiasing
             )
             await self.renderer.initialize()
+            await self.event_bus.publish("startup_progress", 30, "Renderer initialized...")
             
             # Load character
             self.character = Character(
@@ -85,9 +89,20 @@ class VRMAIApplication:
             model_path = Path(self.config.graphics.default_model)
             if model_path.exists():
                 await self.character.load_vrm_model(model_path)
+                await self.event_bus.publish("startup_progress", 50, "VRM model loaded...")
                 await self.renderer.load_character(self.character)
+                await self.event_bus.publish("startup_progress", 60, "Character loaded into renderer...")
             else:
-                logger.warning(f"Default VRM model not found: {model_path}")
+                # Try fallback to sample VRM
+                fallback_path = Path("assets/models/AvatarSample_D.vrm")
+                if fallback_path.exists():
+                    logger.warning(f"Default VRM model not found: {model_path}. Falling back to sample model: {fallback_path}")
+                    await self.character.load_vrm_model(fallback_path)
+                    await self.event_bus.publish("startup_progress", 50, "Fallback VRM model loaded...")
+                    await self.renderer.load_character(self.character)
+                    await self.event_bus.publish("startup_progress", 60, "Character loaded into renderer...")
+                else:
+                    logger.warning(f"Default VRM model not found: {model_path} and fallback sample model not found: {fallback_path}. No character will be loaded.")
             
             # Initialize AI conversation manager
             self.conversation_manager = ConversationManager(
@@ -96,6 +111,7 @@ class VRMAIApplication:
                 event_bus=self.event_bus
             )
             await self.conversation_manager.initialize()
+            await self.event_bus.publish("startup_progress", 65, "AI conversation initialized...")
             
             # Initialize voice synthesis
             self.voice_synthesis = VoiceSynthesis(
@@ -103,6 +119,7 @@ class VRMAIApplication:
                 event_bus=self.event_bus
             )
             await self.voice_synthesis.initialize()
+            await self.event_bus.publish("startup_progress", 75, "Voice synthesis initialized...")
             
             # Initialize speech recognition
             self.speech_manager = SpeechManager(
@@ -110,6 +127,7 @@ class VRMAIApplication:
                 event_bus=self.event_bus
             )
             await self.speech_manager.initialize()
+            await self.event_bus.publish("startup_progress", 85, "Speech recognition initialized...")
             
             # Initialize system integration
             if self.config.system.enable_system_integration:
@@ -118,6 +136,7 @@ class VRMAIApplication:
                     event_bus=self.event_bus
                 )
                 await self.system_integration.initialize()
+                await self.event_bus.publish("startup_progress", 90, "System integration initialized...")
             
             # Initialize LiveKit client if enabled in config or if env vars are present
             livekit_env_present = bool(
@@ -129,10 +148,13 @@ class VRMAIApplication:
                     event_bus=self.event_bus
                 )
                 await self.livekit_client.initialize()
+                await self.event_bus.publish("startup_progress", 95, "LiveKit client initialized...")
             
             # Setup event handlers
             self._setup_event_handlers()
             
+            # Finalize
+            await self.event_bus.publish("startup_progress", 100, "All components initialized")
             logger.info("All components initialized successfully")
             
         except Exception as e:

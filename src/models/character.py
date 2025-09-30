@@ -118,7 +118,42 @@ class Character:
             logger.info(f"Loading VRM model: {model_path}")
             
             # Load glTF/VRM file
-            self.vrm_data = GLTF2.load(str(model_path))
+            # Use binary loader for .glb/.bin files. For .vrm/.gltf (JSON) files,
+            # read bytes and decode as UTF-8 explicitly to avoid Windows default
+            # cp1252 decoding issues which can raise UnicodeDecodeError.
+            ext = model_path.suffix.lower()
+            # Read bytes first to inspect file magic - some files may be mislabeled
+            raw = model_path.read_bytes()
+
+            def _is_glb(bytes_data: bytes) -> bool:
+                # GLB files start with the ASCII magic 'glTF' in the first 4 bytes
+                return len(bytes_data) >= 4 and bytes_data[:4] == b'glTF'
+
+            # If extension suggests binary or content matches GLB magic, use binary loader
+            if ext in [".glb", ".bin", ".vrm"] or _is_glb(raw):
+                try:
+                    self.vrm_data = GLTF2.load_binary(str(model_path))
+                except Exception as e:
+                    logger.warning(f"Binary GLB load failed for {model_path}: {e}; will try JSON fallback")
+                    # fall through to JSON attempt below
+
+            if not self.vrm_data:
+                # Attempt to decode as UTF-8 JSON glTF. If decoding fails, try replacement
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    logger.warning(f"Failed to decode {model_path} as utf-8; using replacement fallback")
+                    text = raw.decode("utf-8", errors="replace")
+
+                try:
+                    obj = GLTF2.from_json(text)
+                    obj._path = model_path.parent
+                    obj._name = model_path.name
+                    self.vrm_data = obj
+                except Exception as e:
+                    logger.error(f"Failed to parse glTF/VRM file {model_path}: {e}")
+                    # Re-raise the original exception to be handled upstream
+                    raise
             
             # Parse VRM extensions
             await self._parse_vrm_extensions()

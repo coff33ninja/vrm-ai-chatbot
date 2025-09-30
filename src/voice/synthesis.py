@@ -8,7 +8,6 @@ import asyncio
 from typing import Optional, Dict, Any, List, Callable
 import threading
 import queue
-from pathlib import Path
 import tempfile
 import os
 
@@ -425,44 +424,46 @@ class VoiceSynthesis:
         try:
             import pygame
             pygame.mixer.init()
-            
+
             while not self.should_stop:
                 try:
                     # Get audio file from queue
                     audio_file = self.audio_queue.get(timeout=1.0)
-                    
+
                     if audio_file and os.path.exists(audio_file):
                         # Play audio
                         pygame.mixer.music.load(audio_file)
                         pygame.mixer.music.play()
-                        
+
                         # Wait for playback to complete
                         while pygame.mixer.music.get_busy() and not self.should_stop:
                             threading.Event().wait(0.1)
-                        
+
                         # Cleanup
                         try:
                             os.unlink(audio_file)
-                        except:
+                        except Exception:
                             pass
-                        
+
                         self.is_speaking = False
-                        
+
                         # Emit speech end event
                         if self.event_bus:
                             asyncio.run_coroutine_threadsafe(
                                 self.event_bus.emit("speech_ended"),
                                 asyncio.get_event_loop()
                             )
-                
+
                 except queue.Empty:
                     continue
                 except Exception as e:
                     logger.error(f"Audio playback error: {e}")
                     self.is_speaking = False
-        
+
         except ImportError:
-            logger.error("pygame not available for audio playback")
+            logger.warning("pygame is not installed. Audio playback for TTS will use pyttsx3 only. "
+                           "To enable advanced audio playback, install pygame.")
+            # Continue: pyttsx3 will still work for TTS playback.
         except Exception as e:
             logger.error(f"Audio playback loop error: {e}")
     
@@ -480,7 +481,7 @@ class VoiceSynthesis:
                     audio_file = self.audio_queue.get_nowait()
                     if os.path.exists(audio_file):
                         os.unlink(audio_file)
-                except:
+                except Exception:
                     pass
             
             logger.debug("Speech synthesis stopped")
@@ -562,7 +563,7 @@ class VoiceSynthesis:
             if self.pyttsx3_engine:
                 try:
                     self.pyttsx3_engine.stop()
-                except:
+                except Exception:
                     pass
             
             logger.info("Voice synthesis shutdown complete")

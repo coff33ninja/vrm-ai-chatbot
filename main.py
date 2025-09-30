@@ -97,6 +97,22 @@ def main():
         
         # Initialize and run the main application
         app = VRMAIApplication(config)
+
+        # Hook splash to event bus so it can receive real progress updates
+        try:
+            # Subscribe to startup_progress events
+            def _on_startup_progress(progress, status):
+                # Called on event bus; forward to splash
+                try:
+                    splash.update_progress(progress, status)
+                except Exception:
+                    pass
+
+            # The application creates its own EventBus on init; we'll subscribe
+            app.event_bus.subscribe("startup_progress", _on_startup_progress)
+        except Exception:
+            # If event bus isn't ready yet, continue; splash will still show simulated progress
+            pass
         
         # Start the application event loop
         asyncio.run(app.run())

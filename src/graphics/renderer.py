@@ -78,10 +78,10 @@ class VRMRenderer:
         # back to a headless no-op renderer to allow the rest of the app to
         # initialize (useful for development or headless environments).
         if not _MODERNGL_AVAILABLE:
-            logger.warning("ModernGL/OpenGL not available; switching to headless renderer.")
+            logger.error("ModernGL/OpenGL not available. Rendering will run in headless mode. "
+                         "To enable 3D rendering, install ModernGL and ensure your system supports OpenGL.")
             # Replace methods with headless implementations
             headless = HeadlessRenderer(self.target_fps)
-            # copy minimal state so callers can still interact
             self.__class__ = HeadlessRendererProxy
             self.__dict__ = headless.__dict__
             await self.initialize()
@@ -112,9 +112,8 @@ class VRMRenderer:
 
         except Exception as e:
             logger.error(f"Failed to initialize renderer: {e}")
-            # If creating a GL context failed despite the module being present,
-            # fall back to headless mode instead of crashing the whole app.
-            logger.warning("Falling back to headless renderer due to error.")
+            logger.warning("Falling back to headless renderer. No OpenGL window detected or context creation failed. "
+                           "If you want 3D rendering, check your GPU drivers and ModernGL installation.")
             headless = HeadlessRenderer(self.target_fps)
             self.__class__ = HeadlessRendererProxy
             self.__dict__ = headless.__dict__

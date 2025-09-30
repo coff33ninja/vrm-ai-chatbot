@@ -16,6 +16,8 @@ class SplashScreen:
         self.progress_var = None
         self.status_var = None
         self.is_showing = False
+        # Control flag to stop internal simulation when real progress events come
+        self._stop_simulation = False
         
     def show(self):
         """Show the splash screen."""
@@ -118,22 +120,39 @@ class SplashScreen:
             for progress, status in steps:
                 if not self.is_showing:
                     break
-                # Schedule UI updates on the Tk main thread to avoid
-                # "main thread is not in main loop" exceptions when
-                # this runs from a background thread.
-                try:
-                    self.root.after(0, lambda p=progress, s=status: self._apply_progress(p, s))
-                except Exception:
-                    # If root is gone or not started, stop
+
+                if self._stop_simulation:
+                    # Real progress reporting has started; stop the simulated steps
                     break
+
+                # Update UI directly from the worker thread. This mirrors the
+                # simpler splash implementation and ensures the splash updates
+                # even while the main thread is running the asyncio loop.
+                try:
+                    self.progress_var.set(progress)
+                    self.status_var.set(status)
+                    # Call update to flush UI changes
+                    self.root.update()
+                except Exception:
+                    # If root is gone or closed, stop
+                    break
+
                 time.sleep(0.5)
             
             # Keep splash visible briefly
             time.sleep(1.0)
-            self.hide()
+            # Hide splash (run on main thread via update to avoid race)
+            try:
+                self.root.after(0, self.hide)
+            except Exception:
+                self.hide()
         # Run in separate thread so initialization logic isn't blocked.
         thread = threading.Thread(target=update_progress, daemon=True)
         thread.start()
+
+    def stop_simulation(self):
+        """Stop the internal progress simulation (used when real init progress begins)."""
+        self._stop_simulation = True
     
     def update_progress(self, progress: float, status: str):
         """Update progress bar and status."""
@@ -141,6 +160,8 @@ class SplashScreen:
             return
         # Always schedule UI changes on the main thread
         try:
+            # Ensure simulation thread stops
+            self.stop_simulation()
             self.root.after(0, lambda: self._apply_progress(progress, status))
         except Exception:
             # Window might be closed

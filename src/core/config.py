@@ -36,6 +36,8 @@ class VoiceConfig(BaseModel):
     stt_engine: str = "whisper"  # whisper, azure, gemini
     stt_language: str = "en-US"
     stt_timeout: float = 5.0
+    # Whisper model selection (e.g., tiny, base, small, medium, large)
+    whisper_model: str = "base"
     
     # Azure Speech Services
     azure_speech_key: Optional[str] = None
