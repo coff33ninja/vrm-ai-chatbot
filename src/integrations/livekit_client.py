@@ -106,27 +106,47 @@ class LiveKitClient:
         # If realtime SDK is available, attempt to join the room (best-effort)
         if token and self._realtime_sdk_available:
             try:
-                # Lazy import of Realtime client to avoid hard dependency
-                from livekit import Room, connect  # type: ignore
+                # Use the installed realtime client under livekit.rtc
+                from livekit.rtc.room import Room  # type: ignore
+                from livekit.rtc import connect  # type: ignore
 
-                # Non-blocking connect attempt - run in executor to avoid blocking
-                def connect_room():
+                async def _join():
                     try:
-                        # `connect` API may differ between SDKs; try to call with URL+token
-                        client = connect(server_url, token=token)
-                        # The object returned may vary; store it for later shutdown
-                        self._client = client
-                        # mark connected
+                        # connect returns a Room instance when using livekit.rtc.connect
+                        room: Room = await connect(server_url, token=token)
+                        self._client = room
+                        self._room = room
                         self._connected = True
                         logger.info("Connected to LiveKit room (realtime) as 'app'.")
-                        # Emit an event to the event bus
-                        asyncio.run_coroutine_threadsafe(self.event_bus.publish('livekit.connected', room=default_room), asyncio.get_event_loop())
+
+                        # Publish connected event
+                        await self.event_bus.publish('livekit.connected', room=default_room)
+
+                        # Register participant join/leave handlers
+                        async def on_participant_update(participant, update):
+                            # update contains state change details; for now, emit simple events
+                            try:
+                                if update == 'joined':
+                                    await self.event_bus.publish('livekit.participant_joined', participant=participant)
+                                elif update == 'left':
+                                    await self.event_bus.publish('livekit.participant_left', participant=participant)
+                            except Exception:
+                                logger.debug('Error publishing participant update')
+
+                        # The Room API provides events; hook a generic listener if available
+                        if hasattr(room, 'on'):
+                            try:
+                                # Some SDKs support 'participant_update' event or similar
+                                room.on('participant_update', on_participant_update)
+                            except Exception:
+                                logger.debug('Could not attach participant_update handler')
+
                         return True
                     except Exception as e:
                         logger.warning(f"Realtime connection attempt failed: {e}")
                         return False
 
-                ok = await asyncio.get_event_loop().run_in_executor(None, connect_room)
+                ok = await _join()
                 if not ok:
                     logger.debug("Realtime join attempt unsuccessful; continuing without realtime connection.")
             except Exception as e:
