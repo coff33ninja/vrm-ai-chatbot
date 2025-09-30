@@ -126,48 +126,59 @@ class Character:
             if not model_path.exists():
                 raise FileNotFoundError(f"VRM model file not found: {model_path}")
 
+            # Resolve absolute path and prepare cache key
             self.model_path = model_path.resolve()
+            cache_key = str(self.model_path)
             logger.info(f"Loading VRM model: {self.model_path}")
 
-            # Return cached parsed GLTF if available (in-memory)
-            cache_key = str(self.model_path)
+            # In-memory cache short-circuit
             cached = self.__class__._vrm_cache.get(cache_key)
             if cached:
                 logger.info(f"Using cached VRM data for {self.model_path}")
                 self.vrm_data = cached
-                # still parse extensions and blend shapes to wire up runtime state
+                # Ensure metadata is set for resource resolution
+                try:
+                    self.vrm_data._path = self.model_path.parent
+                    self.vrm_data._name = self.model_path.name
+                except Exception:
+                    pass
                 await self._parse_vrm_extensions()
                 await self._setup_blend_shapes()
                 await self._initialize_animation_state()
                 logger.info(f"VRM model loaded successfully (from cache): {self.name}")
                 return
 
-            # Read raw bytes first to inspect file magic - some files may be mislabeled
-            raw = model_path.read_bytes()
-
-            # Optional on-disk cache: check environment var VRM_CACHE_DIR or use
-            # .vrm_cache next to repository root. Cache entries are based on
-            # sha256(file_contents). We store the parsed glTF JSON to disk which
-            # pygltflib can re-load via from_json.
+            # Determine cache directory (env override or platform-appropriate default)
+            cache_disabled = os.getenv('VRM_CACHE_DISABLE', '').lower() in ('1', 'true', 'yes')
             cache_dir = os.getenv('VRM_CACHE_DIR')
             if not cache_dir:
-                # default cache directory in the repo root or in user's cache
-                repo_root = Path(__file__).resolve().parents[2]
-                cache_dir = str(repo_root / '.vrm_cache')
-            cache_dir_path = Path(cache_dir)
-            try:
-                cache_dir_path.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                cache_dir_path = None
+                # prefer user cache in home directory; fall back to repo .vrm_cache
+                try:
+                    home_cache = Path.home() / '.cache' / 'vrm_ai_chatbot'
+                    cache_dir = str(home_cache)
+                except Exception:
+                    repo_root = Path(__file__).resolve().parents[2]
+                    cache_dir = str(repo_root / '.vrm_cache')
+
+            cache_dir_path = None
+            if not cache_disabled:
+                try:
+                    cache_dir_path = Path(cache_dir)
+                    cache_dir_path.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    cache_dir_path = None
+
+            # Read raw bytes once (used for digest and fallback parsing)
+            raw = model_path.read_bytes()
 
             def _file_digest(b: bytes) -> str:
                 return hashlib.sha256(b).hexdigest()
 
             file_digest = _file_digest(raw)
             cache_filename = f"{Path(self.model_path).stem}_{file_digest}.gltf.json"
-            cache_file_path = Path(cache_dir) / cache_filename if cache_dir_path else None
+            cache_file_path = (Path(cache_dir) / cache_filename) if cache_dir_path else None
 
-            # If cache file exists, load from it (fast)
+            # Try on-disk cache first (best-effort)
             if cache_file_path and cache_file_path.exists():
                 try:
                     logger.info(f"Loading VRM from on-disk cache: {cache_file_path}")
@@ -188,66 +199,92 @@ class Character:
                     return
                 except Exception as e:
                     logger.warning(f"Failed to load from on-disk cache {cache_file_path}: {e}; will re-parse source file")
-            
-            # Read raw bytes first to inspect file magic - some files may be mislabeled
-            def _is_glb(bytes_data: bytes) -> bool:
-                # GLB files start with the ASCII magic 'glTF' in the first 4 bytes
-                return len(bytes_data) >= 4 and bytes_data[:4] == b'glTF'
 
-            ext = model_path.suffix.lower()
-
-            # Prefer binary loader for true GLB content or common binary extensions.
-            if ext in [".glb", ".bin", ".vrm"] or _is_glb(raw):
+            # Primary load method: let pygltflib detect file type and load
+            try:
+                obj = GLTF2().load(str(self.model_path))
+                # Ensure metadata for resolving relative resources
                 try:
-                    self.vrm_data = GLTF2.load_binary(str(model_path))
-                except Exception as e:
-                    logger.debug(f"GLB binary load attempt failed for {model_path}: {e}")
-                    # Do not fail immediately; try JSON parsing below as a fallback
+                    obj._path = self.model_path.parent
+                    obj._name = self.model_path.name
+                except Exception:
+                    pass
+                self.vrm_data = obj
+            except Exception as primary_exc:
+                logger.debug(f"Primary GLTF2.load() failed for {self.model_path}: {primary_exc}")
 
-            if not self.vrm_data:
-                # Attempt to decode as UTF-8 JSON glTF/VRM. Use 'replace' fallback to
-                # avoid UnicodeDecodeError on Windows-created files with odd encodings.
+                # Fallbacks: try binary load if header looks like GLB, else try JSON parsing
+                def _is_glb(bytes_data: bytes) -> bool:
+                    return len(bytes_data) >= 4 and bytes_data[:4] == b'glTF'
+
+                ext = model_path.suffix.lower()
                 try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    logger.warning(f"Failed to decode {model_path} as utf-8; using replacement fallback")
-                    text = raw.decode("utf-8", errors="replace")
+                    if ext in ('.glb', '.bin', '.vrm') or _is_glb(raw):
+                        try:
+                            self.vrm_data = GLTF2.load_binary(str(model_path))
+                            # set metadata
+                            try:
+                                self.vrm_data._path = self.model_path.parent
+                                self.vrm_data._name = self.model_path.name
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            logger.debug(f"GLB binary load attempt failed for {model_path}: {e}")
 
+                    if not self.vrm_data:
+                        # Attempt to decode as UTF-8 JSON glTF/VRM with replacement fallback
+                        try:
+                            text = raw.decode('utf-8')
+                        except UnicodeDecodeError:
+                            logger.warning(f"Failed to decode {model_path} as utf-8; using replacement fallback")
+                            text = raw.decode('utf-8', errors='replace')
+
+                        try:
+                            obj = GLTF2.from_json(text)
+                            obj._path = model_path.parent
+                            obj._name = model_path.name
+                            self.vrm_data = obj
+                        except Exception as e:
+                            logger.error(f"Failed to parse glTF/VRM file {model_path}: {e}")
+                            raise
+
+                except Exception:
+                    # Re-raise the original primary exception if no fallback succeeded
+                    if not self.vrm_data:
+                        raise primary_exc
+
+            # Optional: validate glTF structure if validator available (non-blocking)
+            try:
+                from pygltflib.validator import validate
                 try:
-                    obj = GLTF2.from_json(text)
-                    # store metadata used by renderer to resolve external resources
-                    obj._path = model_path.parent
-                    obj._name = model_path.name
-                    self.vrm_data = obj
-                except Exception as e:
-                    logger.error(f"Failed to parse glTF/VRM file {model_path}: {e}")
-                    raise
+                    validate(self.vrm_data)
+                    logger.debug("gltf validation passed")
+                except Exception as v_err:
+                    logger.warning(f"gltf validation warning/error: {v_err}")
+            except Exception:
+                # validator not available or validation failed harmlessly; continue
+                pass
 
-            # Cache the parsed object for faster subsequent loads
+            # Cache in-memory
             try:
                 self.__class__._vrm_cache[cache_key] = self.vrm_data
             except Exception:
-                # If caching fails for any reason, continue without blocking load
-                logger.debug("Failed to cache VRM data; continuing without cache")
+                logger.debug("Failed to cache VRM data in-memory; continuing without cache")
 
-            # Save to on-disk cache if possible (best-effort)
-            if cache_file_path:
+            # Save to on-disk cache if allowed
+            if cache_file_path and not cache_disabled:
                 try:
                     js = self.vrm_data.to_json()
                     cache_file_path.write_text(js, encoding='utf-8')
                     logger.debug(f"Wrote VRM cache to {cache_file_path}")
                 except Exception as e:
                     logger.debug(f"Failed to write VRM cache to {cache_file_path}: {e}")
-            
-            # Parse VRM extensions
+
+            # Parse VRM extensions and wire up runtime state
             await self._parse_vrm_extensions()
-            
-            # Setup blend shapes
             await self._setup_blend_shapes()
-            
-            # Initialize animation state
             await self._initialize_animation_state()
-            
+
             logger.info(f"VRM model loaded successfully: {self.name}")
             
         except Exception as e:

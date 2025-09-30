@@ -79,16 +79,37 @@ class VRMRenderer:
         if not _MODERNGL_AVAILABLE:
             logger.error("ModernGL/OpenGL not available. Rendering will run in headless mode. "
                          "To enable 3D rendering, install ModernGL and ensure your system supports OpenGL.")
-            # Replace methods with headless implementations
-            headless = HeadlessRenderer(self.target_fps)
+            # Replace methods with headless implementations but preserve the window
+            headless = HeadlessRenderer(self.target_fps, window=self.window)
             self.__class__ = HeadlessRendererProxy
-            self.__dict__ = headless.__dict__
+            # preserve any attributes that should remain (like window)
+            new_dict = headless.__dict__
+            try:
+                new_dict['window'] = self.window
+            except Exception:
+                pass
+            self.__dict__ = new_dict
             await self.initialize()
             return
 
         try:
-            # Create ModernGL context
-            self.ctx = moderngl.create_context()
+            # Try to create a visible ModernGL context. If the environment has no
+            # windowing/OpenGL, this may fail. We try a visible context first, then
+            # fall back to a standalone (offscreen) context so we can still render
+            # into a texture and blit to the Tk canvas.
+            try:
+                self.ctx = moderngl.create_context()
+                self._offscreen = False
+            except Exception as e_ctx:
+                logger.debug(f"moderngl.create_context() failed: {e_ctx}; trying standalone context")
+                # Try standalone offscreen context
+                try:
+                    self.ctx = moderngl.create_standalone_context()
+                    self._offscreen = True
+                    logger.info("Created ModernGL standalone (offscreen) context")
+                except Exception as e_off:
+                    # Re-raise original to be handled below
+                    raise RuntimeError(f"Failed to create ModernGL context: {e_off}")
 
             # Configure OpenGL settings
             self.ctx.enable(moderngl.DEPTH_TEST)
@@ -96,13 +117,22 @@ class VRMRenderer:
             self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
             if self.antialiasing:
-                self.ctx.enable(moderngl.MULTISAMPLE)
+                # Not all moderngl builds expose MULTISAMPLE as a module attribute
+                try:
+                    ms_flag = getattr(moderngl, 'MULTISAMPLE')
+                    self.ctx.enable(ms_flag)
+                except Exception:
+                    # Ignore if unavailable; antialiasing won't be enabled
+                    logger.debug('MULTISAMPLE flag not available in moderngl; skipping antialiasing')
 
-            # Create framebuffer for rendering
+            # Create framebuffer for rendering (size may be updated later)
+            width = 800
+            height = 600
             self.fbo = self.ctx.framebuffer(
-                color_attachments=[self.ctx.texture((800, 600), 4)],
-                depth_attachment=self.ctx.depth_texture((800, 600))
+                color_attachments=[self.ctx.texture((width, height), 4)],
+                depth_attachment=self.ctx.depth_texture((width, height))
             )
+            self._fbo_size = (width, height)
 
             # Load shaders
             await self._load_shaders()
@@ -113,9 +143,14 @@ class VRMRenderer:
             logger.error(f"Failed to initialize renderer: {e}")
             logger.warning("Falling back to headless renderer. No OpenGL window detected or context creation failed. "
                            "If you want 3D rendering, check your GPU drivers and ModernGL installation.")
-            headless = HeadlessRenderer(self.target_fps)
+            headless = HeadlessRenderer(self.target_fps, window=self.window)
             self.__class__ = HeadlessRendererProxy
-            self.__dict__ = headless.__dict__
+            new_dict = headless.__dict__
+            try:
+                new_dict['window'] = self.window
+            except Exception:
+                pass
+            self.__dict__ = new_dict
             await self.initialize()
     
     async def _load_shaders(self):
@@ -290,9 +325,32 @@ class VRMRenderer:
             }
             
             for prim_idx, primitive in enumerate(mesh.primitives):
+                # Convert Attributes (pygltflib Attributes object) to a plain dict
+                attributes_dict = {}
+                try:
+                    attrs_obj = primitive.attributes
+                    if attrs_obj is not None:
+                        # prefer __dict__ if present
+                        if hasattr(attrs_obj, '__dict__'):
+                            for k, v in vars(attrs_obj).items():
+                                # Only include GLTF attribute names (uppercase)
+                                if isinstance(k, str) and k.isupper():
+                                    attributes_dict[k] = v
+                        else:
+                            # fallback: iterate attribute names likely present
+                            for k in dir(attrs_obj):
+                                if k.isupper():
+                                    try:
+                                        val = getattr(attrs_obj, k)
+                                    except Exception:
+                                        continue
+                                    attributes_dict[k] = val
+                except Exception:
+                    attributes_dict = {}
+
                 prim_data = {
                     'material': primitive.material,
-                    'attributes': primitive.attributes,
+                    'attributes': attributes_dict,
                     'indices': primitive.indices,
                     'mode': primitive.mode or 4  # TRIANGLES
                 }
@@ -679,6 +737,7 @@ class VRMRenderer:
         try:
             # Clear framebuffer
             self.fbo.clear(0.0, 0.0, 0.0, 0.0)
+            # Bind FBO for rendering
             self.fbo.use()
             
             # Update animation
@@ -717,8 +776,52 @@ class VRMRenderer:
                     vao.render()
             
             # Copy to main framebuffer
-            self.ctx.screen.use()
-            self.fbo.color_attachments[0].use(0)
+            if getattr(self, '_offscreen', False):
+                # Read pixels from the offscreen framebuffer and blit to Tk canvas
+                try:
+                    pixels = self.fbo.read(components=4, alignment=1)
+                    # pixels are in GL's bottom-up order; convert to top-down
+                    import PIL.Image as PImage
+                    img = PImage.frombytes('RGBA', self._fbo_size, pixels)
+                    img = img.transpose(PImage.FLIP_TOP_BOTTOM)
+
+                    # Resize to window size if needed
+                    if self.window:
+                        try:
+                            w, h = self.window.get_window_size()
+                        except Exception:
+                            w, h = self._fbo_size
+                        if (w, h) != self._fbo_size:
+                            img = img.resize((w, h), PImage.LANCZOS)
+
+                    # Convert to PhotoImage and display on Tk canvas
+                    try:
+                        from PIL import ImageTk
+                        photo = ImageTk.PhotoImage(img)
+                        self._tk_gl_image = photo
+                        try:
+                            self.window.canvas.delete('gl_preview')
+                        except Exception:
+                            pass
+                        try:
+                            self.window.canvas.create_image(0, 0, anchor='nw', image=photo, tags='gl_preview')
+                        except Exception as e:
+                            logger.debug(f"Failed to draw GL offscreen preview on canvas: {e}")
+                    except Exception as e:
+                        logger.debug(f"Failed to convert offscreen image for canvas: {e}")
+                except Exception as e:
+                    logger.debug(f"Failed to read offscreen framebuffer: {e}")
+            else:
+                # If not offscreen, assume there's a screen to bind
+                try:
+                    self.ctx.screen.use()
+                except Exception:
+                    pass
+                # make sure color attachment is bound if needed
+                try:
+                    self.fbo.color_attachments[0].use(0)
+                except Exception:
+                    pass
             
             # Update performance counters
             self.frame_count += 1
@@ -784,8 +887,9 @@ class HeadlessRenderer:
     in environments without OpenGL support.
     """
 
-    def __init__(self, target_fps: int = 60):
+    def __init__(self, target_fps: int = 60, window=None):
         self.target_fps = target_fps
+        self.window = window
         self.character = None
         self.meshes = []
         self.materials = {}
@@ -794,6 +898,8 @@ class HeadlessRenderer:
         self.standard_program = None
         self.frame_count = 0
         self.fps = 0
+        # Keep a reference to any Tk PhotoImage used for preview to avoid GC
+        self._tk_preview = None
 
     async def initialize(self):
         logger.info("HeadlessRenderer initialized (no GPU/OpenGL)")
@@ -804,6 +910,58 @@ class HeadlessRenderer:
     async def load_character(self, character):
         self.character = character
         logger.info(f"HeadlessRenderer: loaded character {getattr(character, 'name', None)}")
+
+        # Draw a simple preview into the window's Tk canvas so the user sees something
+        try:
+            if self.window and getattr(self.window, 'canvas', None):
+                from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+                # Get canvas size
+                try:
+                    w, h = self.window.get_window_size()
+                except Exception:
+                    w, h = (self.window.width or 800, self.window.height or 600)
+
+                # Create an RGBA image for preview
+                img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(img)
+
+                # Draw a translucent panel and character name
+                panel_color = (20, 20, 20, 200)
+                draw.rectangle([(10, 10), (w - 10, h - 10)], fill=panel_color)
+
+                title = getattr(character, 'name', 'Character') or 'Character'
+                subtitle = '(Headless preview - 3D disabled)'
+
+                try:
+                    # Try to use a default truetype font if available
+                    font = ImageFont.truetype('arial.ttf', 24)
+                    font_sm = ImageFont.truetype('arial.ttf', 14)
+                except Exception:
+                    font = ImageFont.load_default()
+                    font_sm = ImageFont.load_default()
+
+                # Title centered
+                text_x = 20
+                text_y = 20
+                draw.text((text_x, text_y), title, font=font, fill=(255, 255, 255, 255))
+                draw.text((text_x, text_y + 40), subtitle, font=font_sm, fill=(200, 200, 200, 255))
+
+                # Convert to PhotoImage and place on canvas
+                photo = ImageTk.PhotoImage(img)
+                self._tk_preview = photo
+                try:
+                    # Remove previous preview if any
+                    self.window.canvas.delete('headless_preview')
+                except Exception:
+                    pass
+                try:
+                    self.window.canvas.create_image(0, 0, anchor='nw', image=photo, tags='headless_preview')
+                except Exception as e:
+                    logger.debug(f"Failed to draw headless preview on canvas: {e}")
+
+        except Exception as e:
+            logger.debug(f"Headless preview creation failed: {e}")
 
     async def render_frame(self):
         # Simulate work and increment counters
