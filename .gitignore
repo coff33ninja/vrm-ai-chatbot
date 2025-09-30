@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+.env.local
+
+# Environment Variables (keep template)
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+logs/*.log
+*.log
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# VRM Models (too large for git)
+assets/models/*.vrm
+assets/models/*.glb
+assets/models/*.gltf
+
+# Audio files
+assets/voices/*.wav
+assets/voices/*.mp3
+assets/voices/*.ogg
+
+# Generated content
+data/conversations/*
+!data/conversations/.gitkeep
+
+# Google Cloud credentials
+*.json
+!package*.json
+
+# Test outputs
+test_output/
+coverage/
+.coverage
+.pytest_cache/
+
+# Development analysis files
+*.zip
+*_analysis.json
+
+# Windows
+*.exe
+*.msi
+*.msm
+*.msp
+
+# macOS
+*.dmg
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Cache
+.cache/

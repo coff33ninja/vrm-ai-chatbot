@@ -1,0 +1,101 @@
+# VRM AI Chatbot Configuration
+# This file contains all configuration options for your AI character
+
+app_name: "VRM AI Chatbot"
+version: "1.0.0"
+debug: false
+log_level: "INFO"
+
+# AI Configuration
+ai:
+  # Local AI settings (Ollama)
+  use_local_ai: true
+  local_model: "llama3.1:8b"
+  local_api_url: "http://localhost:11434"
+  
+  # Cloud AI settings (requires API keys in .env)
+  openai_api_key: null
+  anthropic_api_key: null
+  gemini_api_key: null
+  gemini_model: "gemini-1.5-flash"
+  azure_api_key: null
+  azure_endpoint: null
+  
+  # Generation parameters
+  temperature: 0.7
+  max_tokens: 1000
+
+# Voice Configuration
+voice:
+  # TTS Engine: pyttsx3, azure, openai, gemini
+  tts_engine: "pyttsx3"
+  tts_voice: "default"
+  tts_rate: 200
+  tts_volume: 0.9
+  
+  # STT Engine: whisper, azure, gemini
+  stt_engine: "whisper"
+  stt_language: "en-US"
+  stt_timeout: 5.0
+  
+  # Azure Speech Services (optional)
+  azure_speech_key: null
+  azure_speech_region: null
+  
+  # Google Cloud Services (optional)
+  google_credentials_path: null
+  language_code: "en-US"
+
+# Graphics and Rendering
+graphics:
+  window_width: 800
+  window_height: 600
+  target_fps: 60
+  vsync: true
+  antialiasing: true
+  transparency: 0.8
+  
+  # VRM Model Settings
+  default_model: "assets/models/default_character.vrm"
+  animation_speed: 1.0
+  lip_sync_enabled: true
+  eye_tracking_enabled: true
+
+# Character Personality
+personality:
+  name: "Aria"
+  personality_traits:
+    - "friendly"
+    - "helpful"
+    - "curious"
+    - "empathetic"
+  background_story: "I'm your AI companion, here to help and chat with you!"
+  speaking_style: "casual and warm"
+  interests:
+    - "technology"
+    - "art"
+    - "music"
+    - "science"
+  
+  # Optional: Load personality from file
+  personality_file: null
+
+# System Integration
+system:
+  enable_system_integration: true
+  startup_with_windows: false
+  minimize_to_tray: true
+  hotkey_toggle: "ctrl+shift+a"
+  
+  # Window Behavior
+  always_on_top: true
+  click_through: false
+  follow_mouse: false
+
+# LiveKit Video Calling (optional)
+livekit:
+  enabled: false
+  server_url: "wss://your-livekit-server.com"
+  api_key: null
+  api_secret: null
+  room_name: "vrm-ai-room"
