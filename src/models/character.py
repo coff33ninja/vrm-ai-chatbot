@@ -189,23 +189,51 @@ class Character:
                     
                     # CRITICAL: JSON cache doesn't have binary_blob, so we need to extract it
                     # from the original file if it's a GLB/VRM
-                    if raw[:4] == b'glTF' and (not hasattr(obj, 'binary_blob') or obj.binary_blob is None):
+                    # Note: binary_blob might be a method or property, so we need to handle it carefully
+                    existing_blob = None
+                    try:
+                        if hasattr(obj, 'binary_blob'):
+                            blob_attr = getattr(obj, 'binary_blob')
+                            # If it's a method, it won't have data; if it's bytes, use it
+                            if isinstance(blob_attr, (bytes, bytearray, memoryview)):
+                                existing_blob = blob_attr
+                    except Exception:
+                        pass
+                    logger.debug(f"Cache load: checking binary_blob. Has attr: {hasattr(obj, 'binary_blob')}, Has data: {existing_blob is not None}, Size: {len(existing_blob) if existing_blob else 0}")
+                    if raw[:4] == b'glTF' and existing_blob is None:
                         try:
                             import struct
+                            logger.debug(f"Extracting binary_blob from GLB file (size: {len(raw)} bytes)")
                             if len(raw) >= 12:
                                 pos = 12
                                 if pos + 8 <= len(raw):
                                     json_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
+                                    json_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                    logger.debug(f"JSON chunk: length={json_chunk_length}, type=0x{json_chunk_type:08X}")
                                     pos += 8 + json_chunk_length
                                     if pos + 8 <= len(raw):
                                         bin_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
                                         bin_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                        logger.debug(f"BIN chunk: length={bin_chunk_length}, type=0x{bin_chunk_type:08X}")
                                         if bin_chunk_type == 0x004E4942:
                                             pos += 8
                                             obj.binary_blob = raw[pos:pos+bin_chunk_length]
-                                            logger.debug(f"Extracted binary_blob from original file: {len(obj.binary_blob)} bytes")
+                                            logger.info(f"Successfully extracted binary_blob from GLB: {len(obj.binary_blob)} bytes")
+                                        else:
+                                            logger.warning(f"Unexpected BIN chunk type: 0x{bin_chunk_type:08X} (expected 0x004E4942)")
+                                    else:
+                                        logger.warning(f"Not enough data for BIN chunk header at position {pos}")
+                                else:
+                                    logger.warning(f"Not enough data for JSON chunk header at position {pos}")
+                            else:
+                                logger.warning(f"File too small to be a valid GLB: {len(raw)} bytes")
                         except Exception as e:
-                            logger.warning(f"Failed to extract binary_blob from cache: {e}")
+                            logger.error(f"Failed to extract binary_blob from cache: {e}", exc_info=True)
+                    else:
+                        if raw[:4] != b'glTF':
+                            logger.debug(f"Not a GLB file (magic: {raw[:4]})")
+                        elif existing_blob is not None:
+                            logger.debug(f"binary_blob already present: {len(existing_blob)} bytes")
                     
                     self.vrm_data = obj
                     # populate in-memory cache
@@ -233,12 +261,23 @@ class Character:
                 
                 # CRITICAL FIX: Ensure binary_blob is set for GLB/VRM files
                 # If this is a GLB file and binary_blob isn't set, set it from the file
-                if not hasattr(obj, 'binary_blob') or obj.binary_blob is None:
+                # Note: binary_blob might be a method or property, check carefully
+                existing_blob = None
+                try:
+                    if hasattr(obj, 'binary_blob'):
+                        blob_attr = getattr(obj, 'binary_blob')
+                        if isinstance(blob_attr, (bytes, bytearray, memoryview)):
+                            existing_blob = blob_attr
+                except Exception:
+                    pass
+                logger.debug(f"Primary load: checking binary_blob. Has attr: {hasattr(obj, 'binary_blob')}, Has data: {existing_blob is not None}, Size: {len(existing_blob) if existing_blob else 0}")
+                if existing_blob is None:
                     # Check if this is a binary file (GLB/VRM)
                     if raw[:4] == b'glTF':
                         try:
                             # Parse GLB header to extract binary chunk
                             import struct
+                            logger.debug(f"Extracting binary_blob from GLB file (primary load, size: {len(raw)} bytes)")
                             # GLB structure: header (12 bytes) + JSON chunk + BIN chunk
                             # Header: magic(4) + version(4) + length(4)
                             # Chunk: chunkLength(4) + chunkType(4) + chunkData
@@ -251,20 +290,34 @@ class Character:
                                 if pos + 8 <= len(raw):
                                     json_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
                                     json_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                    logger.debug(f"JSON chunk: length={json_chunk_length}, type=0x{json_chunk_type:08X}")
                                     pos += 8 + json_chunk_length  # Skip JSON chunk
                                     
                                     # Read BIN chunk if present
                                     if pos + 8 <= len(raw):
                                         bin_chunk_length = struct.unpack('<I', raw[pos:pos+4])[0]
                                         bin_chunk_type = struct.unpack('<I', raw[pos+4:pos+8])[0]
+                                        logger.debug(f"BIN chunk: length={bin_chunk_length}, type=0x{bin_chunk_type:08X}")
                                         
                                         # 0x004E4942 = 'BIN\x00' in little endian
                                         if bin_chunk_type == 0x004E4942:
                                             pos += 8
                                             obj.binary_blob = raw[pos:pos+bin_chunk_length]
-                                            logger.debug(f"Extracted binary_blob: {len(obj.binary_blob)} bytes")
+                                            logger.info(f"Successfully extracted binary_blob from GLB (primary): {len(obj.binary_blob)} bytes")
+                                        else:
+                                            logger.warning(f"Unexpected BIN chunk type: 0x{bin_chunk_type:08X} (expected 0x004E4942)")
+                                    else:
+                                        logger.warning(f"Not enough data for BIN chunk header at position {pos}")
+                                else:
+                                    logger.warning(f"Not enough data for JSON chunk header at position {pos}")
+                            else:
+                                logger.warning(f"File too small to be a valid GLB: {len(raw)} bytes")
                         except Exception as e:
-                            logger.warning(f"Failed to extract binary_blob from GLB: {e}")
+                            logger.error(f"Failed to extract binary_blob from GLB: {e}", exc_info=True)
+                    else:
+                        logger.debug(f"Not a GLB file (magic: {raw[:4]})")
+                else:
+                    logger.debug(f"binary_blob already present: {len(existing_blob)} bytes")
                 
                 self.vrm_data = obj
             except Exception as primary_exc:
@@ -287,9 +340,20 @@ class Character:
                                 pass
                             
                             # Ensure binary_blob is set
-                            if not hasattr(self.vrm_data, 'binary_blob') or self.vrm_data.binary_blob is None:
+                            existing_blob = None
+                            try:
+                                if hasattr(self.vrm_data, 'binary_blob'):
+                                    blob_attr = getattr(self.vrm_data, 'binary_blob')
+                                    if isinstance(blob_attr, (bytes, bytearray, memoryview)):
+                                        existing_blob = blob_attr
+                            except Exception:
+                                pass
+                            
+                            logger.debug(f"Fallback binary load: Has attr: {hasattr(self.vrm_data, 'binary_blob')}, Has data: {existing_blob is not None}, Size: {len(existing_blob) if existing_blob else 0}")
+                            if existing_blob is None:
                                 try:
                                     import struct
+                                    logger.debug(f"Extracting binary_blob from GLB (fallback binary load)")
                                     if len(raw) >= 12 and raw[:4] == b'glTF':
                                         pos = 12
                                         if pos + 8 <= len(raw):
@@ -301,8 +365,11 @@ class Character:
                                                 if bin_chunk_type == 0x004E4942:
                                                     pos += 8
                                                     self.vrm_data.binary_blob = raw[pos:pos+bin_chunk_length]
+                                                    logger.info(f"Successfully extracted binary_blob from GLB (fallback): {len(self.vrm_data.binary_blob)} bytes")
                                 except Exception as e:
-                                    logger.debug(f"Failed to set binary_blob in fallback: {e}")
+                                    logger.error(f"Failed to set binary_blob in fallback: {e}", exc_info=True)
+                            else:
+                                logger.debug(f"binary_blob already present in fallback: {len(existing_blob)} bytes")
                         except Exception as e:
                             logger.debug(f"GLB binary load attempt failed for {model_path}: {e}")
 

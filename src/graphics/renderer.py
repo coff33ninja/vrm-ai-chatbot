@@ -526,20 +526,45 @@ class VRMRenderer:
         buffer_data = None
         
         # Method 1: Check if buffer already has binary_blob (GLB format)
-        if hasattr(vrm_data, 'binary_blob') and vrm_data.binary_blob:
-            buffer_data = vrm_data.binary_blob
-            logger.debug(f"Using binary_blob for buffer {buffer_view.buffer}")
+        # This should be set for GLB/VRM files loaded from cache or directly
+        # Note: binary_blob might be a method, not actual data
+        existing_blob = None
+        try:
+            if hasattr(vrm_data, 'binary_blob'):
+                blob_attr = getattr(vrm_data, 'binary_blob')
+                if isinstance(blob_attr, (bytes, bytearray, memoryview)):
+                    existing_blob = blob_attr
+        except Exception:
+            pass
         
-        # Method 2: Try GLTF2 helper method
+        if existing_blob:
+            # For GLB files, buffer 0 is typically the binary blob
+            if buffer_view.buffer == 0:
+                buffer_data = existing_blob
+                logger.debug(f"Using binary_blob for buffer {buffer_view.buffer}")
+            else:
+                logger.debug(f"binary_blob exists but buffer index is {buffer_view.buffer}, not 0")
+        
+        # Method 2: For GLB files without uri, try to use binary_blob even if buffer index isn't 0
+        if buffer_data is None and existing_blob:
+            try:
+                # In GLB files, all buffers typically point to the same binary blob
+                buffer_data = existing_blob
+                logger.debug(f"Using binary_blob fallback for buffer {buffer_view.buffer}")
+            except Exception as e:
+                logger.debug(f"binary_blob fallback failed: {e}")
+        
+        # Method 3: Try GLTF2 helper method
         if buffer_data is None:
             try:
                 buffer_uri = getattr(buffer, 'uri', None)
-                buffer_data = vrm_data.get_data_from_buffer_uri(buffer_uri)
-                logger.debug(f"Loaded buffer via get_data_from_buffer_uri for buffer {buffer_view.buffer}")
+                if buffer_uri:  # Only try if uri exists
+                    buffer_data = vrm_data.get_data_from_buffer_uri(buffer_uri)
+                    logger.debug(f"Loaded buffer via get_data_from_buffer_uri for buffer {buffer_view.buffer}")
             except Exception as e:
                 logger.debug(f"get_data_from_buffer_uri failed: {e}")
         
-        # Method 3: Handle data URI (base64 encoded)
+        # Method 4: Handle data URI (base64 encoded)
         if buffer_data is None and hasattr(buffer, 'uri') and buffer.uri:
             buffer_uri = buffer.uri
             if buffer_uri.startswith('data:'):
@@ -552,7 +577,7 @@ class VRMRenderer:
                 except Exception as e:
                     logger.warning(f"Failed to decode data URI: {e}")
         
-        # Method 4: Try reading external file
+        # Method 5: Try reading external file
         if buffer_data is None and hasattr(buffer, 'uri') and buffer.uri and not buffer.uri.startswith('data:'):
             try:
                 # Resolve relative to the model path if present
@@ -574,13 +599,23 @@ class VRMRenderer:
             except Exception as e:
                 logger.warning(f"Failed to load external buffer file: {e}")
         
-        # Final check: if still None, raise error
+        # Final check: if still None, raise error with detailed diagnostics
         if buffer_data is None:
+            has_blob = existing_blob is not None
+            blob_size = len(existing_blob) if existing_blob else 0
             raise RuntimeError(
-                f"Failed to load buffer data for accessor {accessor_idx}. "
-                f"Buffer index: {buffer_view.buffer}, "
-                f"Buffer URI: {getattr(buffer, 'uri', 'None')}, "
-                f"Has binary_blob: {hasattr(vrm_data, 'binary_blob')}"
+                f"Failed to load buffer data for accessor {accessor_idx}.\n"
+                f"  Buffer index: {buffer_view.buffer}\n"
+                f"  Buffer URI: {getattr(buffer, 'uri', 'None')}\n"
+                f"  Has binary_blob: {has_blob}\n"
+                f"  Binary blob size: {blob_size} bytes\n"
+                f"  Buffer view offset: {buffer_view.byteOffset or 0}\n"
+                f"  Buffer view length: {buffer_view.byteLength or 0}\n"
+                f"  Model path: {getattr(vrm_data, '_path', 'Unknown')}\n"
+                f"Possible fixes:\n"
+                f"  1. Clear cache and reload: delete {Path.home() / '.cache' / 'vrm_ai_chatbot'}\n"
+                f"  2. Check if VRM file is corrupted\n"
+                f"  3. Try re-downloading the VRM model"
             )
 
         # Normalize buffer_data into a bytes-like object. Some pygltflib
@@ -723,6 +758,7 @@ class VRMRenderer:
             try:
                 # Resolve image data robustly
                 image_data = None
+                
                 # 1) data URI
                 if getattr(image, 'uri', None):
                     uri = image.uri
@@ -734,7 +770,7 @@ class VRMRenderer:
                         except Exception as e:
                             logger.warning(f"Failed to decode data URI for image {img_idx}: {e}")
                     else:
-                        # 2) external file relative to model path or glTF _path
+                        # 2) external file relative to model path
                         possible_bases = []
                         if hasattr(vrm_data, '_path') and vrm_data._path:
                             possible_bases.append(Path(vrm_data._path))
@@ -750,28 +786,51 @@ class VRMRenderer:
                                 except Exception:
                                     logger.debug(f"Failed to read image file {try_path}")
 
-                # 3) bufferView fallback
+                # 3) bufferView fallback - THIS IS THE FIX
                 if image_data is None:
                     if getattr(image, 'bufferView', None) is not None:
                         buffer_view = vrm_data.bufferViews[image.bufferView]
-                        try:
-                            # Use GLTF2 helper or fallback to resolving buffer uri
-                            buffer = vrm_data.buffers[buffer_view.buffer]
-                            buf_uri = getattr(buffer, 'uri', None)
-                            buffer_data = vrm_data.get_data_from_buffer_uri(buf_uri)
-                        except Exception:
-                            # Try resolving relative to model path
+                        buffer = vrm_data.buffers[buffer_view.buffer]
+                        
+                        # Check for binary_blob first (GLB format)
+                        buffer_data = None
+                        if hasattr(vrm_data, 'binary_blob'):
+                            blob = vrm_data.binary_blob
+                            # FIX: Check if it's callable before calling it
+                            if callable(blob):
+                                buffer_data = blob()
+                            elif isinstance(blob, (bytes, bytearray, memoryview)):
+                                buffer_data = blob
+                        
+                        # Fallback to get_data_from_buffer_uri
+                        if buffer_data is None:
                             try:
-                                buf_uri = vrm_data.buffers[buffer_view.buffer].uri
+                                buf_uri = getattr(buffer, 'uri', None)
+                                if buf_uri:
+                                    result = vrm_data.get_data_from_buffer_uri(buf_uri)
+                                    # FIX: Handle if result is callable
+                                    if callable(result):
+                                        buffer_data = result()
+                                    else:
+                                        buffer_data = result
+                            except Exception as e:
+                                logger.debug(f"get_data_from_buffer_uri failed: {e}")
+                        
+                        # Last resort: try reading from file
+                        if buffer_data is None:
+                            try:
+                                buf_uri = buffer.uri
                                 if buf_uri and not buf_uri.startswith('data:'):
                                     base = getattr(vrm_data, '_path', Path('.'))
                                     buffer_path = Path(base) / buf_uri
                                     buffer_data = buffer_path.read_bytes()
-                                else:
-                                    raise
                             except Exception as e:
                                 raise RuntimeError(f"Failed to load image buffer for image {img_idx}: {e}")
-
+                        
+                        if buffer_data is None:
+                            raise RuntimeError(f"Failed to load image buffer for image {img_idx}")
+                        
+                        # Extract the slice for this image
                         offset = buffer_view.byteOffset or 0
                         length = buffer_view.byteLength or 0
                         image_data = buffer_data[offset:offset + length]
@@ -864,38 +923,47 @@ class VRMRenderer:
             if getattr(self, '_offscreen', False):
                 # Read pixels from the offscreen framebuffer and blit to Tk canvas
                 try:
+                    # Read the rendered frame
                     pixels = self.fbo.read(components=4, alignment=1)
-                    # pixels are in GL's bottom-up order; convert to top-down
-                    import PIL.Image as PImage
+                    
+                    # Convert to PIL Image
+                    from PIL import Image as PImage
+                    from PIL import ImageTk
+                    
                     img = PImage.frombytes('RGBA', self._fbo_size, pixels)
+                    # Flip vertically (OpenGL is bottom-up, Tkinter is top-down)
                     img = img.transpose(PImage.FLIP_TOP_BOTTOM)
-
+                    
                     # Resize to window size if needed
                     if self.window:
                         try:
                             w, h = self.window.get_window_size()
-                        except Exception:
-                            w, h = self._fbo_size
-                        if (w, h) != self._fbo_size:
-                            img = img.resize((w, h), PImage.LANCZOS)
-
-                    # Convert to PhotoImage and display on Tk canvas
-                    try:
-                        from PIL import ImageTk
-                        photo = ImageTk.PhotoImage(img)
-                        self._tk_gl_image = photo
-                        try:
-                            self.window.canvas.delete('gl_preview')
-                        except Exception:
-                            pass
-                        try:
-                            self.window.canvas.create_image(0, 0, anchor='nw', image=photo, tags='gl_preview')
+                            if (w, h) != self._fbo_size:
+                                img = img.resize((w, h), PImage.Resampling.LANCZOS)
                         except Exception as e:
-                            logger.debug(f"Failed to draw GL offscreen preview on canvas: {e}")
-                    except Exception as e:
-                        logger.debug(f"Failed to convert offscreen image for canvas: {e}")
+                            logger.debug(f"Could not get window size: {e}")
+                    
+                    # Convert to Tkinter PhotoImage
+                    # Must provide master window to avoid "no default root" error
+                    photo = ImageTk.PhotoImage(img, master=self.window.root)
+                    
+                    # Keep reference to prevent garbage collection
+                    self._tk_photo = photo
+                    
+                    # Clear previous image and draw new one
+                    if self.window and self.window.canvas:
+                        self.window.canvas.delete('gl_render')
+                        self.window.canvas.create_image(
+                            0, 0, 
+                            anchor='nw', 
+                            image=photo, 
+                            tags='gl_render'
+                        )
+                        # Force canvas update
+                        self.window.canvas.update_idletasks()
+                    
                 except Exception as e:
-                    logger.debug(f"Failed to read offscreen framebuffer: {e}")
+                    logger.error(f"Failed to display offscreen render: {e}", exc_info=True)
             else:
                 # If not offscreen, assume there's a screen to bind
                 try:
