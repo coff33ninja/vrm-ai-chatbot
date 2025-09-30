@@ -11,6 +11,7 @@ Extend this class later with full session/room management as needed.
 
 import logging
 import asyncio
+import os
 from typing import Optional
 
 from ..core.config import LiveKitConfig
@@ -39,59 +40,126 @@ class LiveKitClient:
         self._connected = False
         self._client = None
         self._room = None
-
-        # Attempt to import optional LiveKit SDK pieces
+        # Attempt to import optional LiveKit SDK pieces (admin & access token)
         try:
-            # server/admin SDK (for room management, etc.)
             from livekit.api.livekit_api import LivekitApi  # type: ignore
-            from livekit.api.access_token import AccessToken, VideoGrant  # type: ignore
             self._LivekitApi = LivekitApi
+        except Exception:
+            self._LivekitApi = None
+
+        try:
+            # Access token helpers
+            from livekit.api.access_token import AccessToken, VideoGrant  # type: ignore
             self._AccessToken = AccessToken
             self._VideoGrant = VideoGrant
         except Exception:
-            self._LivekitApi = None
             self._AccessToken = None
             self._VideoGrant = None
+
+        # Optionally try to import realtime (client) SDK for active room join
+        try:
+            import livekit  # type: ignore
+            # we will attempt to import the Realtime client lazily later
+            self._realtime_sdk_available = True
+        except Exception:
+            self._realtime_sdk_available = False
 
     async def initialize(self):
         """Initialize connection to LiveKit (best-effort)."""
         logger.info("Initializing LiveKit client...")
-
         # If LiveKit integration is not enabled, nothing to do.
-        if not getattr(self.config, 'enabled', False):
+        enabled = getattr(self.config, 'enabled', False) or os.environ.get('LIVEKIT_ENABLED', '1') == '1'
+        if not enabled:
             logger.info("LiveKit is disabled in configuration; skipping initialization.")
             return
 
-        # Try to import livekit SDKs if available.
-        try:
-            # Prefer the async realtime SDK if available. We only check
-            # presence rather than importing heavy symbols here.
-            __import__('livekit')
-            sdk_available = True
-        except Exception:
-            sdk_available = False
+        # Pull configuration from config with env var fallbacks
+        server_url = getattr(self.config, 'server_url', None) or os.environ.get('LIVEKIT_URL')
+        api_key = getattr(self.config, 'api_key', None) or os.environ.get('LIVEKIT_API_KEY')
+        api_secret = getattr(self.config, 'api_secret', None) or os.environ.get('LIVEKIT_API_SECRET')
 
-        if not sdk_available:
-            logger.warning("LiveKit SDK not installed; LiveKit features will be disabled.")
+        if not server_url or not api_key or not api_secret:
+            logger.warning("LiveKit credentials or server URL missing; LiveKit will remain inactive.")
             return
 
-        # At this stage, an advanced implementation would create a
-        # LiveKit room connection and manage participants. For now we
-        # set connected=True so the application thinks the component
-        # initialized successfully.
-        # Keep this non-blocking and safe for development environments.
-        await asyncio.sleep(0)  # yield control
-        self._connected = True
-        logger.info("LiveKit client initialized (stub).")
+        # Try to ensure admin SDK presence for room management
+        if not self._LivekitApi and not self._AccessToken:
+            logger.warning("LiveKit admin SDK not fully available; some features (room create/token) may be disabled.")
+
+        # Try to create a default room (best-effort). Use admin API if available.
+        default_room = getattr(self.config, 'room', None) or os.environ.get('LIVEKIT_DEFAULT_ROOM', 'main')
+        if self._LivekitApi:
+            try:
+                created = await asyncio.get_event_loop().run_in_executor(None, lambda: self.create_room_if_missing(default_room))
+                if created:
+                    logger.info("LiveKit room ensured: %s", default_room)
+            except Exception as e:
+                logger.warning("LiveKit room creation attempt failed: %s", e)
+
+        # Generate an access token for the application to use if possible
+        token = None
+        try:
+            token = self.generate_access_token(identity='app', room=default_room)
+        except Exception:
+            token = None
+
+        # If realtime SDK is available, attempt to join the room (best-effort)
+        if token and self._realtime_sdk_available:
+            try:
+                # Lazy import of Realtime client to avoid hard dependency
+                from livekit import Room, connect  # type: ignore
+
+                # Non-blocking connect attempt - run in executor to avoid blocking
+                def connect_room():
+                    try:
+                        # `connect` API may differ between SDKs; try to call with URL+token
+                        client = connect(server_url, token=token)
+                        # The object returned may vary; store it for later shutdown
+                        self._client = client
+                        # mark connected
+                        self._connected = True
+                        logger.info("Connected to LiveKit room (realtime) as 'app'.")
+                        # Emit an event to the event bus
+                        asyncio.run_coroutine_threadsafe(self.event_bus.publish('livekit.connected', room=default_room), asyncio.get_event_loop())
+                        return True
+                    except Exception as e:
+                        logger.warning(f"Realtime connection attempt failed: {e}")
+                        return False
+
+                ok = await asyncio.get_event_loop().run_in_executor(None, connect_room)
+                if not ok:
+                    logger.debug("Realtime join attempt unsuccessful; continuing without realtime connection.")
+            except Exception as e:
+                logger.debug(f"Realtime SDK join skipped due to error: {e}")
+        else:
+            if not token:
+                logger.debug("LiveKit token not available; skipping realtime join.")
+            if not self._realtime_sdk_available:
+                logger.debug("Realtime SDK not available; skipping realtime join.")
+
+        # Consider the client initialized if admin or realtime steps completed
+        self._connected = bool(self._client) or bool(self._LivekitApi)
+        logger.info("LiveKit client initialization finished; connected=%s", self._connected)
 
     async def shutdown(self):
         """Shutdown LiveKit client and cleanup resources."""
-        if not getattr(self.config, 'enabled', False):
+        enabled = getattr(self.config, 'enabled', False) or os.environ.get('LIVEKIT_ENABLED', '1') == '1'
+        if not enabled:
             return
 
         logger.info("Shutting down LiveKit client...")
         try:
-            # In a real implementation you'd close room/connection here.
+            # If we have a realtime client, attempt a graceful disconnect
+            if self._client:
+                try:
+                    # Some SDKs expose a close/disconnect method
+                    if hasattr(self._client, 'disconnect'):
+                        await asyncio.get_event_loop().run_in_executor(None, self._client.disconnect)
+                    elif hasattr(self._client, 'close'):
+                        await asyncio.get_event_loop().run_in_executor(None, self._client.close)
+                except Exception:
+                    logger.debug("Error while disconnecting realtime client; continuing with shutdown.")
+
             await asyncio.sleep(0)
             self._connected = False
             logger.info("LiveKit client shut down.")
@@ -109,7 +177,9 @@ class LiveKitClient:
         credentials (api_key/api_secret) exist in the configuration. Returns a
         JWT string or None if generation failed or SDK is not available.
         """
-        if not getattr(self.config, 'api_key', None) or not getattr(self.config, 'api_secret', None):
+        api_key = getattr(self.config, 'api_key', None) or os.environ.get('LIVEKIT_API_KEY')
+        api_secret = getattr(self.config, 'api_secret', None) or os.environ.get('LIVEKIT_API_SECRET')
+        if not api_key or not api_secret:
             logger.warning("LiveKit API key/secret not configured; cannot generate token.")
             return None
 
@@ -123,22 +193,35 @@ class LiveKitClient:
             token = None
             try:
                 # Preferred: AccessToken(api_key, api_secret, identity=..., ttl=...)
-                access = self._AccessToken(self.config.api_key, self.config.api_secret, identity=identity)
+                access = self._AccessToken(api_key, api_secret, identity=identity)
                 grant = self._VideoGrant(room=room) if room else self._VideoGrant()
-                access.add_grant(grant)
-                token = access.to_jwt()
-            except Exception:
-                # Fallback: try constructor with positional args (older/newer SDKs vary)
-                access = self._AccessToken(self.config.api_key, self.config.api_secret, identity)
-                grant = self._VideoGrant(room)
                 try:
                     access.add_grant(grant)
                 except Exception:
+                    # Some SDK variants use different grant APIs
                     pass
                 try:
                     token = access.to_jwt()
                 except Exception as e:
                     logger.debug(f"AccessToken.to_jwt() failed: {e}")
+                    token = None
+            except Exception:
+                # Fallback: try constructor with positional args (older/newer SDKs vary)
+                try:
+                    access = self._AccessToken(api_key, api_secret, identity)
+                    grant = self._VideoGrant(room)
+                    try:
+                        access.add_grant(grant)
+                    except Exception:
+                        pass
+                    try:
+                        token = access.to_jwt()
+                    except Exception as e:
+                        logger.debug(f"AccessToken.to_jwt() fallback failed: {e}")
+                        token = None
+                except Exception as e:
+                    logger.debug(f"AccessToken construction failed: {e}")
+                    token = None
 
             if token:
                 logger.debug("Generated LiveKit access token for identity=%s room=%s", identity, room)
@@ -158,6 +241,10 @@ class LiveKitClient:
         optional admin SDK is not available, the method logs a warning and
         returns False.
         """
+        api_key = getattr(self.config, 'api_key', None) or os.environ.get('LIVEKIT_API_KEY')
+        api_secret = getattr(self.config, 'api_secret', None) or os.environ.get('LIVEKIT_API_SECRET')
+        server_url = getattr(self.config, 'server_url', None) or os.environ.get('LIVEKIT_URL')
+
         if not self._LivekitApi:
             logger.warning("LivekitApi not available; cannot manage rooms.")
             return False
@@ -167,10 +254,10 @@ class LiveKitClient:
             # accept different constructor parameters; try a few patterns.
             api = None
             try:
-                api = self._LivekitApi(host=self.config.server_url, api_key=self.config.api_key, api_secret=self.config.api_secret)  # type: ignore
+                api = self._LivekitApi(host=server_url, api_key=api_key, api_secret=api_secret)  # type: ignore
             except Exception:
                 try:
-                    api = self._LivekitApi(base_url=self.config.server_url, api_key=self.config.api_key, api_secret=self.config.api_secret)  # type: ignore
+                    api = self._LivekitApi(base_url=server_url, api_key=api_key, api_secret=api_secret)  # type: ignore
                 except Exception as e:
                     logger.debug(f"Could not instantiate LivekitApi client: {e}")
                     api = None
