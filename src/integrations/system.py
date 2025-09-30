@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import keyboard
-from typing import Optional
+from types import SimpleNamespace
 
 from ..core.config import SystemConfig
 from ..utils.event_bus import EventBus
@@ -19,14 +19,24 @@ class SystemIntegration:
 
     async def initialize(self):
         """Initializes the system integration, setting up hotkey listeners."""
-        if not self.config.hotkeys:
-            logger.info("No hotkeys configured.")
-            return
+        # Support both new and older configuration shapes. New configs may
+        # provide `hotkeys` (list of objects with key/action/suppress).
+        # Older configs provide a single `hotkey_toggle` string. Build a
+        # compatible list for registration.
+        hotkeys = getattr(self.config, 'hotkeys', None)
+        if hotkeys is None:
+            # Fallback to single toggle hotkey if available
+            toggle = getattr(self.config, 'hotkey_toggle', None)
+            if toggle:
+                hotkeys = [SimpleNamespace(key=toggle, action='toggle_visibility', suppress=False)]
+            else:
+                logger.info("No hotkeys configured.")
+                return
 
         self._is_running = True
         loop = asyncio.get_running_loop()
 
-        for hotkey_action in self.config.hotkeys:
+        for hotkey_action in hotkeys:
             try:
                 # keyboard.add_hotkey is blocking, so run it in an executor
                 await loop.run_in_executor(

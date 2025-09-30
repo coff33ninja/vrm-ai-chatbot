@@ -9,8 +9,13 @@ from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 import json
 
-import moderngl
-from OpenGL.GL import *
+try:
+    import moderngl
+    from OpenGL.GL import *  # noqa: F401
+    _MODERNGL_AVAILABLE = True
+except Exception:
+    moderngl = None  # type: ignore
+    _MODERNGL_AVAILABLE = False
 import pyrr
 from pygltflib import GLTF2
 
@@ -69,32 +74,51 @@ class VRMRenderer:
     
     async def initialize(self):
         """Initialize the OpenGL context and rendering resources."""
+        # Try to initialize a real ModernGL context. If unavailable, fall
+        # back to a headless no-op renderer to allow the rest of the app to
+        # initialize (useful for development or headless environments).
+        if not _MODERNGL_AVAILABLE:
+            logger.warning("ModernGL/OpenGL not available; switching to headless renderer.")
+            # Replace methods with headless implementations
+            headless = HeadlessRenderer(self.target_fps)
+            # copy minimal state so callers can still interact
+            self.__class__ = HeadlessRendererProxy
+            self.__dict__ = headless.__dict__
+            await self.initialize()
+            return
+
         try:
             # Create ModernGL context
             self.ctx = moderngl.create_context()
-            
+
             # Configure OpenGL settings
             self.ctx.enable(moderngl.DEPTH_TEST)
             self.ctx.enable(moderngl.BLEND)
             self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-            
+
             if self.antialiasing:
                 self.ctx.enable(moderngl.MULTISAMPLE)
-            
+
             # Create framebuffer for rendering
             self.fbo = self.ctx.framebuffer(
                 color_attachments=[self.ctx.texture((800, 600), 4)],
                 depth_attachment=self.ctx.depth_texture((800, 600))
             )
-            
+
             # Load shaders
             await self._load_shaders()
-            
+
             logger.info("OpenGL context initialized successfully")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize renderer: {e}")
-            raise
+            # If creating a GL context failed despite the module being present,
+            # fall back to headless mode instead of crashing the whole app.
+            logger.warning("Falling back to headless renderer due to error.")
+            headless = HeadlessRenderer(self.target_fps)
+            self.__class__ = HeadlessRendererProxy
+            self.__dict__ = headless.__dict__
+            await self.initialize()
     
     async def _load_shaders(self):
         """Load VRM-compatible shaders."""
@@ -674,3 +698,49 @@ class VRMRenderer:
             
         except Exception as e:
             logger.error(f"Error during renderer shutdown: {e}")
+
+
+class HeadlessRenderer:
+    """A simple headless renderer that implements the same public API
+    expected by the application but does no GPU work. Useful for running
+    in environments without OpenGL support.
+    """
+
+    def __init__(self, target_fps: int = 60):
+        self.target_fps = target_fps
+        self.character = None
+        self.meshes = []
+        self.materials = {}
+        self.textures = {}
+        self.mtoon_program = None
+        self.standard_program = None
+        self.frame_count = 0
+        self.fps = 0
+
+    async def initialize(self):
+        logger.info("HeadlessRenderer initialized (no GPU/OpenGL)")
+
+    async def _load_shaders(self):
+        logger.info("HeadlessRenderer: _load_shaders (noop)")
+
+    async def load_character(self, character):
+        self.character = character
+        logger.info(f"HeadlessRenderer: loaded character {getattr(character, 'name', None)}")
+
+    async def render_frame(self):
+        # Simulate work and increment counters
+        self.frame_count += 1
+
+    async def update_character(self):
+        logger.debug("HeadlessRenderer: update_character noop")
+
+    async def shutdown(self):
+        logger.info("HeadlessRenderer shutdown complete")
+
+
+class HeadlessRendererProxy(HeadlessRenderer):
+    """Proxy class used to swap instances into VRMRenderer variable locations
+    while preserving method names and attributes expected by the rest of the
+    application. It simply inherits HeadlessRenderer.
+    """
+    pass
