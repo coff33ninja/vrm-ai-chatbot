@@ -118,17 +118,20 @@ class SplashScreen:
             for progress, status in steps:
                 if not self.is_showing:
                     break
-                    
-                self.progress_var.set(progress)
-                self.status_var.set(status)
-                self.root.update()
+                # Schedule UI updates on the Tk main thread to avoid
+                # "main thread is not in main loop" exceptions when
+                # this runs from a background thread.
+                try:
+                    self.root.after(0, lambda p=progress, s=status: self._apply_progress(p, s))
+                except Exception:
+                    # If root is gone or not started, stop
+                    break
                 time.sleep(0.5)
             
             # Keep splash visible briefly
             time.sleep(1.0)
             self.hide()
-        
-        # Run in separate thread
+        # Run in separate thread so initialization logic isn't blocked.
         thread = threading.Thread(target=update_progress, daemon=True)
         thread.start()
     
@@ -136,13 +139,27 @@ class SplashScreen:
         """Update progress bar and status."""
         if not self.is_showing or not self.root:
             return
-            
+        # Always schedule UI changes on the main thread
+        try:
+            self.root.after(0, lambda: self._apply_progress(progress, status))
+        except Exception:
+            # Window might be closed
+            return
+
+    def _apply_progress(self, progress: float, status: str):
+        """Apply progress updates on the Tk main loop."""
+        if not self.is_showing or not self.root:
+            return
+
         try:
             self.progress_var.set(progress)
             self.status_var.set(status)
-            self.root.update()
-        except:
-            pass  # Window might be closed
+            # Use update_idletasks to flush changes without forcing a full
+            # event loop re-entry from a background thread.
+            self.root.update_idletasks()
+        except Exception:
+            # Ignore errors during teardown
+            pass
     
     def hide(self):
         """Hide the splash screen."""
@@ -151,7 +168,7 @@ class SplashScreen:
             
         try:
             self.root.destroy()
-        except:
+        except Exception:
             pass
             
         self.root = None
