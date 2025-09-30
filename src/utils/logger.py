@@ -53,3 +53,7 @@ def setup_logging(log_level: str = "INFO", log_dir: str = "logs"):
     root_logger.addHandler(error_handler)
     
     logging.info("Logging configured successfully")
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance with the given name."""
+    return logging.getLogger(name)

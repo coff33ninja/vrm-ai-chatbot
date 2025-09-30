@@ -6,25 +6,12 @@ Handles speech-to-text functionality and manages audio input.
 import asyncio
 import logging
 from typing import Optional, Callable, Dict, Any
-from dataclasses import dataclass
 
 from .gemini_stt import GeminiSTT, GeminiSTTConfig, create_gemini_stt
+from ..core.config import VoiceConfig
 from ..utils.event_bus import EventBus
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SpeechConfig:
-    """Configuration for speech recognition."""
-    enabled: bool = True
-    provider: str = "gemini"  # "gemini" or other providers
-    language_code: str = "en-US"
-    sample_rate_hertz: int = 16000
-    credentials_path: Optional[str] = None
-    auto_start: bool = False
-    device_index: Optional[int] = None
-    enable_continuous: bool = True
 
 
 class SpeechManager:
@@ -33,12 +20,12 @@ class SpeechManager:
     Coordinates between STT providers and the event bus.
     """
     
-    def __init__(self, config: SpeechConfig, event_bus: EventBus):
+    def __init__(self, config: VoiceConfig, event_bus: EventBus):
         """
         Initialize the speech manager.
         
         Args:
-            config: Speech configuration
+            config: Voice configuration
             event_bus: Event bus for inter-component communication
         """
         self.config = config
@@ -52,15 +39,20 @@ class SpeechManager:
     async def initialize(self):
         """Initialize the speech recognition system."""
         try:
-            if not self.config.enabled:
+            # Check if STT is configured
+            if self.config.stt_engine == "none":
                 logger.info("Speech recognition disabled in configuration")
                 return
             
             # Initialize STT client based on provider
-            if self.config.provider == "gemini":
+            if self.config.stt_engine == "gemini":
                 self.stt_client = await self._initialize_gemini_stt()
+            elif self.config.stt_engine == "whisper":
+                # TODO: Implement Whisper STT
+                logger.warning("Whisper STT not yet implemented")
+                return
             else:
-                logger.warning(f"Unknown STT provider: {self.config.provider}")
+                logger.warning(f"Unknown STT engine: {self.config.stt_engine}")
                 return
             
             if not self.stt_client:
@@ -69,22 +61,18 @@ class SpeechManager:
             
             self.is_initialized = True
             logger.info("Speech Manager initialized successfully")
-            
-            # Auto-start listening if configured
-            if self.config.auto_start:
-                await self.start_listening()
                 
         except Exception as e:
             logger.error(f"Failed to initialize Speech Manager: {e}", exc_info=True)
-            raise
+            # Don't raise - allow the app to continue without speech recognition
     
     async def _initialize_gemini_stt(self) -> Optional[GeminiSTT]:
         """Initialize Google Cloud STT client."""
         try:
             stt_config = GeminiSTTConfig(
-                credentials_path=self.config.credentials_path,
-                language_code=self.config.language_code,
-                sample_rate_hertz=self.config.sample_rate_hertz,
+                credentials_path=self.config.google_credentials_path,
+                language_code=self.config.stt_language,
+                sample_rate_hertz=16000,
                 enable_automatic_punctuation=True,
                 model="latest_long"
             )
@@ -115,7 +103,7 @@ class SpeechManager:
             # Start listening with callback
             self.stt_client.start_listening(
                 callback=self._on_speech_recognized,
-                device_index=self.config.device_index
+                device_index=None
             )
             
             self.is_listening = True
@@ -210,8 +198,6 @@ class SpeechManager:
             device_index: Index of the audio device to use
         """
         try:
-            self.config.device_index = device_index
-            
             # Restart listening if currently active
             if self.is_listening:
                 await self.stop_listening()
