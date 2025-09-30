@@ -6,7 +6,7 @@ Coordinates all components and manages the main application loop.
 import asyncio
 import logging
 import signal
-import sys
+import os
 from typing import Optional
 from pathlib import Path
 
@@ -119,8 +119,11 @@ class VRMAIApplication:
                 )
                 await self.system_integration.initialize()
             
-            # Initialize LiveKit client
-            if self.config.livekit.enabled:
+            # Initialize LiveKit client if enabled in config or if env vars are present
+            livekit_env_present = bool(
+                os.environ.get('LIVEKIT_URL') and os.environ.get('LIVEKIT_API_KEY') and os.environ.get('LIVEKIT_API_SECRET')
+            )
+            if self.config.livekit.enabled or livekit_env_present:
                 self.livekit_client = LiveKitClient(
                     config=self.config.livekit,
                     event_bus=self.event_bus
